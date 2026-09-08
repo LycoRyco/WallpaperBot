@@ -25,6 +25,17 @@ type QueuedWallpaper = {
   scheduled_for: string | null;
 };
 
+type ExistingWallpaper = {
+  id: string;
+  status: string;
+  scheduled_for: string | null;
+};
+
+type XPostLink = {
+  postId: string;
+  canonicalUrl: string;
+};
+
 const TELEGRAM_WEBHOOK_PATH = "/telegram/webhook";
 const TELEGRAM_SETUP_PATH = "/internal/register-webhook";
 
@@ -154,7 +165,20 @@ async function handleOwnerMessage(update: TelegramUpdate, env: BotEnv): Promise<
 
   if (text === "/queue") {
     await sendTelegramMessage(env, chatId, await buildQueueMessage(env));
+    return;
   }
+
+  const xPost = parseXPostLink(text);
+  if (xPost) {
+    await sendTelegramMessage(env, chatId, await receiveXPost(xPost, env));
+    return;
+  }
+
+  await sendTelegramMessage(
+    env,
+    chatId,
+    "Send a direct public X (Twitter) post link containing images, or use /help.",
+  );
 }
 
 async function claimTelegramUpdate(updateId: number, env: BotEnv): Promise<boolean> {
@@ -198,6 +222,88 @@ function formatTehranTime(value: string): string {
     timeStyle: "short",
     hour12: false,
   }).format(new Date(value));
+}
+
+function parseXPostLink(text: string): XPostLink | null {
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    return null;
+  }
+
+  if (url.protocol !== "https:") {
+    return null;
+  }
+
+  const supportedHosts = new Set([
+    "x.com",
+    "www.x.com",
+    "mobile.x.com",
+    "twitter.com",
+    "www.twitter.com",
+    "mobile.twitter.com",
+  ]);
+  if (!supportedHosts.has(url.hostname.toLowerCase())) {
+    return null;
+  }
+
+  const match = url.pathname.match(/(?:^|\/)status\/(\d+)(?:\/|$)/);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    postId: match[1],
+    canonicalUrl: `https://x.com${url.pathname.replace(/\/$/, "")}`,
+  };
+}
+
+async function receiveXPost(xPost: XPostLink, env: BotEnv): Promise<string> {
+  const existing = await env.WALLPAPERBOT_DB.prepare(
+    "SELECT id, status, scheduled_for FROM wallpapers WHERE x_post_id = ?",
+  )
+    .bind(xPost.postId)
+    .first<ExistingWallpaper>();
+
+  if (existing) {
+    if (existing.status === "failed") {
+      await env.WALLPAPERBOT_DB.batch([
+        env.WALLPAPERBOT_DB.prepare(
+          `UPDATE wallpapers
+           SET status = 'extracting', retry_count = 0, next_retry_at = NULL,
+               last_error = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+           WHERE id = ?`,
+        ).bind(existing.id),
+        env.WALLPAPERBOT_DB.prepare(
+          "INSERT INTO wallpaper_events (wallpaper_id, event_type) VALUES (?, 'retry_requested')",
+        ).bind(existing.id),
+      ]);
+      return "That post previously failed. Its extraction retry cycle has been restarted.";
+    }
+
+    const schedule = existing.scheduled_for
+      ? ` It is scheduled for ${formatTehranTime(existing.scheduled_for)}.`
+      : " It is already being processed.";
+    return `That X post is already known to the bot.${schedule}`;
+  }
+
+  const wallpaperId = crypto.randomUUID();
+  await env.WALLPAPERBOT_DB.batch([
+    env.WALLPAPERBOT_DB.prepare(
+      `INSERT INTO wallpapers (id, x_post_id, source_url, status)
+       VALUES (?, ?, ?, 'extracting')`,
+    ).bind(wallpaperId, xPost.postId, xPost.canonicalUrl),
+    env.WALLPAPERBOT_DB.prepare(
+      "INSERT INTO wallpaper_events (wallpaper_id, event_type) VALUES (?, 'submitted')",
+    ).bind(wallpaperId),
+  ]);
+
+  return [
+    "X post saved to the queue.",
+    "",
+    "Image extraction and automatic slot selection are the next build feature, so this test item is currently awaiting extraction.",
+  ].join("\n");
 }
 
 async function sendTelegramMessage(

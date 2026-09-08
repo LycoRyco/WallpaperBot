@@ -69,6 +69,12 @@ We will add:
 
 Test: submit example entries and verify slot selection, duplicate handling, and rescheduling.
 
+Completed so far:
+
+- Versioned D1 schema applied locally and to the live database.
+- `/queue` reads the live database.
+- X post links are validated, normalized, and protected from duplicate submission.
+
 ## Stage 5 — X image extraction and archive
 
 **Purpose:** Turn a real X post into safely stored images.
