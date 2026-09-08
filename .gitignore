@@ -1,0 +1,22 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Node.js and package managers
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build and Cloudflare local state
+dist/
+.wrangler/
+wrangler.toml.bak
+
+# Test reports and local tooling
+coverage/
+.DS_Store
+Thumbs.db
+*.log
