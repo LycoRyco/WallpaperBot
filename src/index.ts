@@ -52,6 +52,14 @@ type ArchiveWallpaper = {
   archive_message_ids: string | null;
 };
 
+type WallpaperId = {
+  id: string;
+};
+
+type OccupiedSlot = {
+  scheduled_for: string;
+};
+
 type XPostLink = {
   postId: string;
   canonicalUrl: string;
@@ -262,6 +270,7 @@ async function setBotSetting(
 }
 
 async function buildQueueMessage(env: BotEnv): Promise<string> {
+  await assignSlotsForArchivedWallpapers(env);
   const result = await env.WALLPAPERBOT_DB.prepare(
     `SELECT artist_handle, source_url, status, scheduled_for
      FROM wallpapers
@@ -539,6 +548,143 @@ async function archiveExtractedWallpaper(
   )
     .bind(wallpaperId)
     .run();
+
+  await assignNextAvailableSlot(wallpaperId, env);
+}
+
+async function assignSlotsForArchivedWallpapers(env: BotEnv): Promise<void> {
+  const ready = await env.WALLPAPERBOT_DB.prepare(
+    `SELECT id FROM wallpapers
+     WHERE status = 'scheduled' AND scheduled_for IS NULL
+       AND EXISTS (SELECT 1 FROM media WHERE media.wallpaper_id = wallpapers.id)
+       AND NOT EXISTS (
+         SELECT 1 FROM media
+         WHERE media.wallpaper_id = wallpapers.id AND media.archive_file_id IS NULL
+       )
+     ORDER BY created_at`,
+  ).all<WallpaperId>();
+
+  for (const wallpaper of ready.results) {
+    await assignNextAvailableSlot(wallpaper.id, env);
+  }
+}
+
+async function assignNextAvailableSlot(
+  wallpaperId: string,
+  env: BotEnv,
+): Promise<string | null> {
+  const occupiedResult = await env.WALLPAPERBOT_DB.prepare(
+    `SELECT scheduled_for FROM wallpapers
+     WHERE status IN ('scheduled', 'publishing') AND scheduled_for IS NOT NULL`,
+  ).all<OccupiedSlot>();
+  const occupied = new Set(occupiedResult.results.map((wallpaper) => wallpaper.scheduled_for));
+
+  for (const candidate of futureTehranSlots(new Date())) {
+    const value = candidate.toISOString();
+    if (occupied.has(value)) {
+      continue;
+    }
+
+    try {
+      const result = await env.WALLPAPERBOT_DB.prepare(
+        `UPDATE wallpapers
+         SET scheduled_for = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ? AND scheduled_for IS NULL`,
+      )
+        .bind(value, wallpaperId)
+        .run();
+      if (result.meta.changes !== 1) {
+        return null;
+      }
+
+      await env.WALLPAPERBOT_DB.prepare(
+        "INSERT INTO wallpaper_events (wallpaper_id, event_type, details_json) VALUES (?, 'slot_assigned', ?)",
+      )
+        .bind(wallpaperId, JSON.stringify({ scheduledFor: value }))
+        .run();
+      return value;
+    } catch {
+      // The unique D1 index wins a rare simultaneous assignment race.
+      occupied.add(value);
+    }
+  }
+
+  return null;
+}
+
+function futureTehranSlots(now: Date): Date[] {
+  const earliest = new Date(now.getTime() + 15 * 60 * 1000);
+  const today = tehranDateParts(now);
+  const slots: Date[] = [];
+
+  for (let dayOffset = 0; dayOffset < 22; dayOffset += 1) {
+    const date = new Date(Date.UTC(today.year, today.month - 1, today.day + dayOffset));
+    for (const hour of [9, 10, 11]) {
+      const slot = tehranLocalTimeToUtc(
+        date.getUTCFullYear(),
+        date.getUTCMonth() + 1,
+        date.getUTCDate(),
+        hour,
+        0,
+      );
+      if (slot.getTime() >= earliest.getTime()) {
+        slots.push(slot);
+      }
+    }
+  }
+  return slots;
+}
+
+function tehranLocalTimeToUtc(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+): Date {
+  const targetMilliseconds = Date.UTC(year, month - 1, day, hour, minute);
+  let timestamp = targetMilliseconds;
+
+  // Iteration accounts for the IANA timezone offset instead of assuming a
+  // fixed UTC offset for Tehran.
+  for (let iteration = 0; iteration < 3; iteration += 1) {
+    const observed = tehranDateParts(new Date(timestamp));
+    const observedMilliseconds = Date.UTC(
+      observed.year,
+      observed.month - 1,
+      observed.day,
+      observed.hour,
+      observed.minute,
+    );
+    timestamp += targetMilliseconds - observedMilliseconds;
+  }
+  return new Date(timestamp);
+}
+
+function tehranDateParts(date: Date): {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+} {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Tehran",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const value = (type: string): number => Number(parts.find((part) => part.type === type)?.value);
+  return {
+    year: value("year"),
+    month: value("month"),
+    day: value("day"),
+    hour: value("hour"),
+    minute: value("minute"),
+  };
 }
 
 async function getBotSetting(key: string, env: BotEnv): Promise<string | null> {
