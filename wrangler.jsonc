@@ -3,5 +3,12 @@
   "name": "wallpaperbot",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-08",
-  "workers_dev": true
+  "workers_dev": true,
+  "d1_databases": [
+    {
+      "binding": "WALLPAPERBOT_DB",
+      "database_name": "wallpaperbot-db",
+      "database_id": "498b82e1-3a59-4b4d-98f9-71df8c44b94d"
+    }
+  ]
 }
