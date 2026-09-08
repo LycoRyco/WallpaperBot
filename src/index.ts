@@ -276,10 +276,13 @@ async function buildQueueMessage(env: BotEnv): Promise<string> {
 
   const entries = result.results.map((wallpaper, index) => {
     const artist = wallpaper.artist_handle ?? "Unknown artist";
-    const when = wallpaper.scheduled_for
-      ? formatTehranTime(wallpaper.scheduled_for)
-      : "Awaiting extraction";
-    return `${index + 1}. ${artist} — ${when} (${wallpaper.status})`;
+    const state =
+      wallpaper.status === "scheduled" && !wallpaper.scheduled_for
+        ? "Ready — waiting for a slot"
+        : wallpaper.scheduled_for
+          ? `${formatTehranTime(wallpaper.scheduled_for)} (${wallpaper.status})`
+          : "Awaiting extraction";
+    return `${index + 1}. ${artist} — ${state}`;
   });
 
   return ["Wallpaper queue", "", ...entries].join("\n");
@@ -522,6 +525,14 @@ async function archiveExtractedWallpaper(
       ).bind(JSON.stringify(messageIds), wallpaperId),
     ]);
   }
+
+  await env.WALLPAPERBOT_DB.prepare(
+    `UPDATE wallpapers
+     SET status = 'scheduled', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE id = ?`,
+  )
+    .bind(wallpaperId)
+    .run();
 
   await env.WALLPAPERBOT_DB.prepare(
     "INSERT INTO wallpaper_events (wallpaper_id, event_type) VALUES (?, 'archived')",
