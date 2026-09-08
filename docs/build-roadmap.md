@@ -35,15 +35,17 @@ You will be guided through:
 
 Private archive-channel connection:
 
-1. Add the bot as a channel administrator with permission to post messages.
-2. Post exactly `#wallpaperbot-archive-setup` as a new message in the private archive channel.
-3. The bot reads the channel ID automatically and confirms in your private bot chat.
+1. Add the bot as a channel administrator with permission to post messages and delete its own messages.
+2. Send `/connectarchive` to the bot privately. It gives you a one-time code valid for 10 minutes.
+3. Post the exact marker and code it gives you as a new message in the private archive channel.
+4. The bot reads the channel ID, removes the setup marker, and confirms in your private bot chat.
 
 Public wallpaper-channel connection:
 
-1. Add the bot as an administrator in the public wallpaper channel, with permission to post messages and media.
-2. Post exactly `#wallpaperbot-public-setup` as a new channel message.
-3. The bot confirms in your private bot chat. The setup marker is an ordinary channel message; it does **not** trigger a wallpaper publication.
+1. Add the bot as an administrator in the public wallpaper channel, with permission to post messages, media, and delete its own messages.
+2. Send `/connectpublic` to the bot privately. It gives you a one-time code valid for 10 minutes.
+3. Post the exact marker and code it gives you as a new channel message.
+4. The bot removes the setup marker and confirms in your private bot chat. It does **not** trigger a wallpaper publication.
 
 No token will ever be pasted into source code or committed to Git.
 
@@ -119,7 +121,7 @@ Implementation notes:
 
 - **Cancel** asks for confirmation, then removes the wallpaper from the queue and deletes its files from the private archive channel.
 - **Reschedule** offers the next six free Tehran-time slots.
-- **Publish now** posts to whichever channel was most recently connected with `#wallpaperbot-public-setup`. During testing, that is the test channel.
+- **Publish now** posts to the channel most recently connected with `/connectpublic`. During testing, that is the test channel.
 
 ## Stage 7 — Automatic publication
 

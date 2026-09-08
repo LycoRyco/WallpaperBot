@@ -4,7 +4,7 @@ A personal Telegram bot for turning an X (Twitter) post link into a scheduled wa
 
 WallpaperBot downloads the images from a supported X post, keeps them in their original order, sends you a private preview, and publishes them to your Telegram channel at the next available Tehran-time slot.
 
-> **Project status:** The secure queue, X image extraction, private archive, scheduling, and private previews are working. Channel publication controls are next.
+> **Project status:** The secure queue, X image extraction, private archive, previews, controls, retries, and automatic Tehran-time publication are working. The bot is currently connected to a test channel.
 
 ## What the bot will do
 

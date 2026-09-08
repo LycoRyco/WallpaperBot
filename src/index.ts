@@ -23,6 +23,7 @@ type TelegramUpdate = {
       id: number;
       type?: string;
     };
+    message_id?: number;
     text?: string;
   };
   callback_query?: {
@@ -121,6 +122,7 @@ const TELEGRAM_WEBHOOK_PATH = "/telegram/webhook";
 const TELEGRAM_SETUP_PATH = "/internal/register-webhook";
 const ARCHIVE_SETUP_MARKER = "#wallpaperbot-archive-setup";
 const PUBLIC_CHANNEL_SETUP_MARKER = "#wallpaperbot-public-setup";
+const CHANNEL_SETUP_LIFETIME_MS = 10 * 60 * 1000;
 
 export default {
   async fetch(request: Request, env: BotEnv, ctx: ExecutionContext): Promise<Response> {
@@ -262,7 +264,9 @@ async function handleOwnerMessage(
         "Commands available now:",
         "/start — show this message",
         "/help — show this message",
-        "/queue — view the queue (coming next)",
+        "/queue — view the current queue",
+        "/clearqueue — permanently clear queued items",
+        "/connectpublic — connect a public channel with a one-time code",
       ].join("\n"),
     );
     return;
@@ -286,6 +290,16 @@ async function handleOwnerMessage(
     return;
   }
 
+  if (text === "/connectpublic") {
+    await requestChannelConnection("public", chatId, env);
+    return;
+  }
+
+  if (text === "/connectarchive") {
+    await requestChannelConnection("archive", chatId, env);
+    return;
+  }
+
   const xPost = parseXPostLink(text);
   if (xPost) {
     await sendTelegramMessage(env, chatId, await receiveXPost(xPost, env, chatId, ctx));
@@ -303,31 +317,85 @@ async function handleChannelSetup(update: TelegramUpdate, env: BotEnv): Promise<
   const channelPost = update.channel_post;
   const channelId = channelPost?.chat?.id;
   const marker = channelPost?.text?.trim();
-  if (channelId === undefined) {
+  const messageId = channelPost?.message_id;
+  const setup = parseChannelSetupMarker(marker);
+  if (channelId === undefined || messageId === undefined || !setup) {
     return;
   }
 
-  if (!(await claimTelegramUpdate(update.update_id, env))) {
+  const pending = await getPendingChannelConnection(setup.kind, env);
+  if (!pending || pending.code !== setup.code || pending.expiresAt <= Date.now()) {
+    console.warn("Ignored an invalid or expired channel connection marker.");
     return;
   }
 
-  if (marker === ARCHIVE_SETUP_MARKER) {
-    await setBotSetting("archive_channel_id", String(channelId), env);
-    await sendTelegramMessage(
-      env,
-      env.OWNER_TELEGRAM_USER_ID,
-      "Private archive channel connected successfully.",
-    );
-    return;
-  }
+  if (!(await claimTelegramUpdate(update.update_id, env))) return;
 
-  if (marker === PUBLIC_CHANNEL_SETUP_MARKER) {
-    await setBotSetting("public_channel_id", String(channelId), env);
-    await sendTelegramMessage(
-      env,
-      env.OWNER_TELEGRAM_USER_ID,
-      "Public wallpaper channel connected successfully. Nothing has been published.",
-    );
+  await setBotSetting(`${setup.kind}_channel_id`, String(channelId), env);
+  await deleteBotSetting(`pending_${setup.kind}_channel_setup`, env);
+  try {
+    await telegramApi(env, "deleteMessage", { chat_id: String(channelId), message_id: messageId });
+  } catch (error) {
+    console.warn("Could not remove channel setup marker", error);
+  }
+  await sendTelegramMessage(
+    env,
+    env.OWNER_TELEGRAM_USER_ID,
+    setup.kind === "archive"
+      ? "Private archive channel connected successfully."
+      : "Public wallpaper channel connected successfully. Nothing has been published.",
+  );
+}
+
+type ChannelKind = "archive" | "public";
+
+type PendingChannelConnection = {
+  code: string;
+  expiresAt: number;
+};
+
+function parseChannelSetupMarker(value: string | undefined): { kind: ChannelKind; code: string } | null {
+  if (!value) return null;
+  const match = value.match(/^(#wallpaperbot-(archive|public)-setup)\s+([0-9a-f-]{36})$/i);
+  if (!match) return null;
+  return {
+    kind: match[2].toLowerCase() as ChannelKind,
+    code: match[3].toLowerCase(),
+  };
+}
+
+async function requestChannelConnection(kind: ChannelKind, chatId: number, env: BotEnv): Promise<void> {
+  const code = crypto.randomUUID();
+  const marker = kind === "archive" ? ARCHIVE_SETUP_MARKER : PUBLIC_CHANNEL_SETUP_MARKER;
+  await setBotSetting(
+    `pending_${kind}_channel_setup`,
+    JSON.stringify({ code, expiresAt: Date.now() + CHANNEL_SETUP_LIFETIME_MS }),
+    env,
+  );
+  await sendTelegramMessage(
+    env,
+    chatId,
+    [
+      `To connect the ${kind === "archive" ? "private archive" : "public wallpaper"} channel, send this exact message in that channel within 10 minutes:`,
+      "",
+      `${marker} ${code}`,
+      "",
+      "The bot will remove this setup message after connecting the channel.",
+    ].join("\n"),
+  );
+}
+
+async function getPendingChannelConnection(
+  kind: ChannelKind,
+  env: BotEnv,
+): Promise<PendingChannelConnection | null> {
+  const value = await getBotSetting(`pending_${kind}_channel_setup`, env);
+  if (!value) return null;
+  try {
+    const pending = JSON.parse(value) as PendingChannelConnection;
+    return typeof pending.code === "string" && typeof pending.expiresAt === "number" ? pending : null;
+  } catch {
+    return null;
   }
 }
 
@@ -433,6 +501,14 @@ async function setBotSetting(
        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
   )
     .bind(key, value)
+    .run();
+}
+
+async function deleteBotSetting(key: string, env: BotEnv): Promise<void> {
+  await env.WALLPAPERBOT_DB.prepare(
+    "DELETE FROM bot_settings WHERE setting_key = ?",
+  )
+    .bind(key)
     .run();
 }
 
@@ -715,7 +791,8 @@ async function archiveExtractedWallpaper(
 
   await env.WALLPAPERBOT_DB.prepare(
     `UPDATE wallpapers
-     SET status = 'scheduled', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     SET status = 'scheduled', retry_count = 0, next_retry_at = NULL, last_error = NULL,
+         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
      WHERE id = ?`,
   )
     .bind(wallpaperId)
