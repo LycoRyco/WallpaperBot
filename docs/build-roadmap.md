@@ -11,11 +11,14 @@ Completed:
 - Public GitHub repository connected.
 - README, safe configuration template, and Git ignore rules added.
 - Architecture decision record added.
+- TypeScript Cloudflare Worker foundation created.
+- Local Worker health check tested successfully.
 
-Next in this stage:
+Available local commands:
 
-- Create the TypeScript Cloudflare Worker project.
-- Add local development commands and automated checks.
+- `npm run dev` — starts a local-only Worker for development.
+- `npm run typecheck` — checks TypeScript for mistakes.
+- `npm run deploy` — deploys only after Cloudflare has been configured.
 
 ## Stage 2 — Telegram and Cloudflare accounts
 
