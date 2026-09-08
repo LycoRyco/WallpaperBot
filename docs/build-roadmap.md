@@ -115,6 +115,12 @@ We will add:
 
 Test: use all three buttons on test wallpapers without publishing unintended posts.
 
+Implementation notes:
+
+- **Cancel** asks for confirmation, then removes the wallpaper from the queue and deletes its files from the private archive channel.
+- **Reschedule** offers the next six free Tehran-time slots.
+- **Publish now** posts to whichever channel was most recently connected with `#wallpaperbot-public-setup`. During testing, that is the test channel.
+
 ## Stage 7 — Automatic publication
 
 **Purpose:** Publish the complete channel format automatically.

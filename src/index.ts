@@ -25,6 +25,11 @@ type TelegramUpdate = {
     };
     text?: string;
   };
+  callback_query?: {
+    id?: string;
+    from?: { id?: number };
+    data?: string;
+  };
 };
 
 type QueuedWallpaper = {
@@ -69,6 +74,26 @@ type PreviewWallpaper = {
 
 type PreviewMedia = {
   preview_url: string;
+};
+
+type ControlWallpaper = {
+  id: string;
+  artist_handle: string | null;
+  source_url: string;
+  status: string;
+  scheduled_for: string | null;
+  archive_message_ids: string | null;
+  published_photo_message_ids: string | null;
+  published_document_message_ids: string | null;
+};
+
+type PublishMedia = {
+  preview_url: string;
+  archive_file_id: string;
+};
+
+type TelegramInlineKeyboard = {
+  inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
 };
 
 type XPostLink = {
@@ -130,6 +155,11 @@ async function handleTelegramWebhook(
 
   if (update.channel_post) {
     await handleChannelSetup(update, env);
+    return new Response("OK");
+  }
+
+  if (update.callback_query) {
+    await handleCallbackQuery(update, env, ctx);
     return new Response("OK");
   }
 
@@ -266,6 +296,75 @@ async function handleChannelSetup(update: TelegramUpdate, env: BotEnv): Promise<
       "Public wallpaper channel connected successfully. Nothing has been published.",
     );
   }
+}
+
+async function handleCallbackQuery(
+  update: TelegramUpdate,
+  env: BotEnv,
+  ctx: ExecutionContext,
+): Promise<void> {
+  const callback = update.callback_query;
+  const callbackId = callback?.id;
+  const senderId = callback?.from?.id;
+  const data = callback?.data;
+  if (!callbackId || senderId === undefined || !data) return;
+
+  if (String(senderId) !== env.OWNER_TELEGRAM_USER_ID) {
+    await answerCallbackQuery(env, callbackId, "This control belongs to the bot owner.");
+    return;
+  }
+  if (!(await claimTelegramUpdate(update.update_id, env))) return;
+
+  const [action, wallpaperId, value] = data.split(":");
+  if (!wallpaperId || !isWallpaperId(wallpaperId)) {
+    await answerCallbackQuery(env, callbackId, "This control is no longer valid.");
+    return;
+  }
+
+  if (action === "c") {
+    await answerCallbackQuery(env, callbackId);
+    await sendTelegramMessage(
+      env,
+      env.OWNER_TELEGRAM_USER_ID,
+      "Cancel this wallpaper permanently? Its queue record and private archive files will be deleted.",
+      { inline_keyboard: [[
+        { text: "Yes, cancel permanently", callback_data: `x:${wallpaperId}` },
+        { text: "Keep it", callback_data: `k:${wallpaperId}` },
+      ]] },
+    );
+    return;
+  }
+
+  if (action === "k") {
+    await answerCallbackQuery(env, callbackId, "Wallpaper kept.");
+    return;
+  }
+
+  if (action === "x") {
+    await answerCallbackQuery(env, callbackId, "Canceling wallpaper…");
+    ctx.waitUntil(cancelWallpaper(wallpaperId, env));
+    return;
+  }
+
+  if (action === "r") {
+    if (value) {
+      await answerCallbackQuery(env, callbackId, "Rescheduling wallpaper…");
+      ctx.waitUntil(rescheduleWallpaper(wallpaperId, Number(value), env));
+    } else {
+      await answerCallbackQuery(env, callbackId);
+      await sendRescheduleChoices(wallpaperId, env);
+    }
+    return;
+  }
+
+  if (action === "p") {
+    await answerCallbackQuery(env, callbackId, "Publishing to the connected channel…");
+    ctx.waitUntil(publishWallpaper(wallpaperId, env));
+  }
+}
+
+function isWallpaperId(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
 
 async function claimTelegramUpdate(updateId: number, env: BotEnv): Promise<boolean> {
@@ -691,7 +790,12 @@ async function sendScheduledPreview(wallpaperId: string, env: BotEnv): Promise<v
     "",
     "The visual preview and exact channel caption are shown above.",
   ].join("\n");
-  const sent = await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, text);
+  const sent = await sendTelegramMessage(
+    env,
+    env.OWNER_TELEGRAM_USER_ID,
+    text,
+    previewControls(wallpaper.id),
+  );
   if (sent && visualSent) {
     await env.WALLPAPERBOT_DB.prepare(
       "INSERT INTO wallpaper_events (wallpaper_id, event_type) VALUES (?, 'preview_sent')",
@@ -699,6 +803,18 @@ async function sendScheduledPreview(wallpaperId: string, env: BotEnv): Promise<v
       .bind(wallpaperId)
       .run();
   }
+}
+
+function previewControls(wallpaperId: string): TelegramInlineKeyboard {
+  return {
+    inline_keyboard: [
+      [
+        { text: "Publish now", callback_data: `p:${wallpaperId}` },
+        { text: "Reschedule", callback_data: `r:${wallpaperId}` },
+      ],
+      [{ text: "Cancel", callback_data: `c:${wallpaperId}` }],
+    ],
+  };
 }
 
 function buildChannelCaption(artistHandle: string, sourceUrl: string): string {
@@ -999,23 +1115,252 @@ async function recordExtractionFailure(
   ]);
 }
 
+async function sendRescheduleChoices(wallpaperId: string, env: BotEnv): Promise<void> {
+  const wallpaper = await getControlWallpaper(wallpaperId, env);
+  if (!wallpaper || wallpaper.status !== "scheduled") {
+    await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "That wallpaper is no longer available to reschedule.");
+    return;
+  }
+
+  const slots = await availableFutureSlots(wallpaperId, env);
+  if (slots.length === 0) {
+    await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "There are no free future slots available yet.");
+    return;
+  }
+
+  await sendTelegramMessage(
+    env,
+    env.OWNER_TELEGRAM_USER_ID,
+    "Choose a new Tehran-time publication slot:",
+    {
+      inline_keyboard: slots.slice(0, 6).map((slot) => [{
+        text: formatTehranTime(slot.toISOString()),
+        callback_data: `r:${wallpaperId}:${slot.getTime()}`,
+      }]),
+    },
+  );
+}
+
+async function availableFutureSlots(wallpaperId: string, env: BotEnv): Promise<Date[]> {
+  const occupiedResult = await env.WALLPAPERBOT_DB.prepare(
+    `SELECT scheduled_for FROM wallpapers
+     WHERE id != ? AND status IN ('scheduled', 'publishing') AND scheduled_for IS NOT NULL`,
+  )
+    .bind(wallpaperId)
+    .all<OccupiedSlot>();
+  const occupied = new Set(occupiedResult.results.map((wallpaper) => wallpaper.scheduled_for));
+  return futureTehranSlots(new Date()).filter((slot) => !occupied.has(slot.toISOString()));
+}
+
+async function rescheduleWallpaper(
+  wallpaperId: string,
+  milliseconds: number,
+  env: BotEnv,
+): Promise<void> {
+  const slot = new Date(milliseconds);
+  const validSlot = Number.isFinite(slot.getTime()) && (await availableFutureSlots(wallpaperId, env))
+    .some((candidate) => candidate.getTime() === slot.getTime());
+  if (!validSlot) {
+    await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "That time slot is no longer available. Choose Reschedule again.");
+    return;
+  }
+
+  const scheduledFor = slot.toISOString();
+  const result = await env.WALLPAPERBOT_DB.prepare(
+    `UPDATE wallpapers
+     SET scheduled_for = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE id = ? AND status = 'scheduled'`,
+  )
+    .bind(scheduledFor, wallpaperId)
+    .run();
+  if (result.meta.changes !== 1) {
+    await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "That wallpaper can no longer be rescheduled.");
+    return;
+  }
+
+  await env.WALLPAPERBOT_DB.prepare(
+    "INSERT INTO wallpaper_events (wallpaper_id, event_type, details_json) VALUES (?, 'rescheduled', ?)",
+  )
+    .bind(wallpaperId, JSON.stringify({ scheduledFor }))
+    .run();
+  await sendTelegramMessage(
+    env,
+    env.OWNER_TELEGRAM_USER_ID,
+    `Rescheduled for ${formatTehranTime(scheduledFor)} Tehran time.`,
+  );
+}
+
+async function cancelWallpaper(wallpaperId: string, env: BotEnv): Promise<void> {
+  const wallpaper = await getControlWallpaper(wallpaperId, env);
+  const archiveChannelId = await getBotSetting("archive_channel_id", env);
+  if (!wallpaper || wallpaper.status !== "scheduled" || !archiveChannelId) {
+    await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "That wallpaper can no longer be canceled.");
+    return;
+  }
+
+  const messageIds = parseMessageIds(wallpaper.archive_message_ids);
+  for (const messageId of messageIds) {
+    await telegramApi(env, "deleteMessage", { chat_id: archiveChannelId, message_id: messageId });
+  }
+  await env.WALLPAPERBOT_DB.batch([
+    env.WALLPAPERBOT_DB.prepare("DELETE FROM wallpaper_events WHERE wallpaper_id = ?").bind(wallpaperId),
+    env.WALLPAPERBOT_DB.prepare("DELETE FROM media WHERE wallpaper_id = ?").bind(wallpaperId),
+    env.WALLPAPERBOT_DB.prepare("DELETE FROM wallpapers WHERE id = ?").bind(wallpaperId),
+  ]);
+  await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "Wallpaper canceled and its private archive files were deleted.");
+}
+
+async function publishWallpaper(wallpaperId: string, env: BotEnv): Promise<void> {
+  const publicChannelId = await getBotSetting("public_channel_id", env);
+  if (!publicChannelId) {
+    await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "No public wallpaper channel is connected yet.");
+    return;
+  }
+
+  const locked = await env.WALLPAPERBOT_DB.prepare(
+    `UPDATE wallpapers SET status = 'publishing', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE id = ? AND status = 'scheduled'`,
+  )
+    .bind(wallpaperId)
+    .run();
+  if (locked.meta.changes !== 1) {
+    await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "That wallpaper is already being published or is no longer available.");
+    return;
+  }
+
+  try {
+    const wallpaper = await getControlWallpaper(wallpaperId, env);
+    const media = await env.WALLPAPERBOT_DB.prepare(
+      "SELECT preview_url, archive_file_id FROM media WHERE wallpaper_id = ? ORDER BY source_position",
+    )
+      .bind(wallpaperId)
+      .all<PublishMedia>();
+    if (!wallpaper?.artist_handle || media.results.length === 0 || media.results.some((item) => !item.archive_file_id)) {
+      throw new Error("The archived media for this wallpaper is incomplete.");
+    }
+
+    let photoIds = parseMessageIds(wallpaper.published_photo_message_ids);
+    if (photoIds.length === 0) {
+      photoIds = await sendPublicPhotos(env, publicChannelId, media.results.map((item) => item.preview_url), buildChannelCaption(wallpaper.artist_handle, wallpaper.source_url));
+      await env.WALLPAPERBOT_DB.prepare(
+        "UPDATE wallpapers SET published_photo_message_ids = ? WHERE id = ?",
+      ).bind(JSON.stringify(photoIds), wallpaperId).run();
+    }
+
+    let documentIds = parseMessageIds(wallpaper.published_document_message_ids);
+    for (let index = documentIds.length; index < media.results.length; index += 1) {
+      const result = await telegramApi(env, "sendDocument", {
+        chat_id: publicChannelId,
+        document: media.results[index].archive_file_id,
+        disable_notification: true,
+      }) as { message_id?: number };
+      if (result.message_id === undefined) throw new Error("Telegram did not return a document message ID.");
+      documentIds.push(result.message_id);
+      await env.WALLPAPERBOT_DB.prepare(
+        "UPDATE wallpapers SET published_document_message_ids = ? WHERE id = ?",
+      ).bind(JSON.stringify(documentIds), wallpaperId).run();
+    }
+
+    await env.WALLPAPERBOT_DB.batch([
+      env.WALLPAPERBOT_DB.prepare(
+        "UPDATE wallpapers SET status = 'published', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+      ).bind(wallpaperId),
+      env.WALLPAPERBOT_DB.prepare(
+        "INSERT INTO wallpaper_events (wallpaper_id, event_type) VALUES (?, 'published')",
+      ).bind(wallpaperId),
+    ]);
+    await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "Wallpaper published successfully to the connected test channel.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "An unexpected publication error occurred.";
+    await env.WALLPAPERBOT_DB.prepare(
+      `UPDATE wallpapers SET status = 'scheduled', last_error = ?,
+       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
+    ).bind(message, wallpaperId).run();
+    await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, `Could not publish this wallpaper: ${message}`);
+  }
+}
+
+async function getControlWallpaper(wallpaperId: string, env: BotEnv): Promise<ControlWallpaper | null> {
+  return env.WALLPAPERBOT_DB.prepare(
+    `SELECT id, artist_handle, source_url, status, scheduled_for, archive_message_ids,
+            published_photo_message_ids, published_document_message_ids
+     FROM wallpapers WHERE id = ?`,
+  )
+    .bind(wallpaperId)
+    .first<ControlWallpaper>();
+}
+
+async function sendPublicPhotos(
+  env: BotEnv,
+  channelId: string,
+  urls: string[],
+  caption: string,
+): Promise<number[]> {
+  const previewUrls = urls.map((value) => {
+    const url = new URL(value);
+    url.searchParams.set("name", "large");
+    return url.toString();
+  });
+  const method = previewUrls.length === 1 ? "sendPhoto" : "sendMediaGroup";
+  const result = await telegramApi(env, method, previewUrls.length === 1
+    ? { chat_id: channelId, photo: previewUrls[0], caption, parse_mode: "HTML", disable_notification: true }
+    : {
+      chat_id: channelId,
+      disable_notification: true,
+      media: previewUrls.map((url, index) => ({
+        type: "photo", media: url,
+        ...(index === 0 ? { caption, parse_mode: "HTML" } : {}),
+      })),
+    });
+  const messages = Array.isArray(result) ? result : [result];
+  const ids = messages.map((message) => (message as { message_id?: number }).message_id);
+  if (ids.some((id) => id === undefined)) throw new Error("Telegram did not return photo message IDs.");
+  return ids as number[];
+}
+
 async function sendTelegramMessage(
   env: BotEnv,
   chatId: number | string,
   text: string,
+  replyMarkup?: TelegramInlineKeyboard,
 ): Promise<boolean> {
-  const response = await fetch(
-    `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text }),
-    },
-  );
-
-  if (!response.ok) {
-    console.error("Telegram sendMessage failed", await response.text());
+  try {
+    await telegramApi(env, "sendMessage", {
+      chat_id: chatId,
+      text,
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+    });
+    return true;
+  } catch (error) {
+    console.error("Telegram sendMessage failed", error);
     return false;
   }
-  return true;
+}
+
+async function answerCallbackQuery(env: BotEnv, callbackQueryId: string, text?: string): Promise<void> {
+  try {
+    await telegramApi(env, "answerCallbackQuery", {
+      callback_query_id: callbackQueryId,
+      ...(text ? { text } : {}),
+    });
+  } catch (error) {
+    console.error("Telegram callback acknowledgement failed", error);
+  }
+}
+
+async function telegramApi(
+  env: BotEnv,
+  method: string,
+  body: Record<string, unknown>,
+): Promise<unknown> {
+  const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload = (await response.json()) as { ok?: boolean; result?: unknown; description?: string };
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.description || `Telegram ${method} failed`);
+  }
+  return payload.result;
 }
