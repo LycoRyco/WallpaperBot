@@ -98,6 +98,15 @@ type TelegramInlineKeyboard = {
   inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
 };
 
+type TelegramReplyKeyboard = {
+  keyboard: string[][];
+  resize_keyboard: true;
+  is_persistent: true;
+  input_field_placeholder: string;
+};
+
+type TelegramReplyMarkup = TelegramInlineKeyboard | TelegramReplyKeyboard;
+
 type ClearableWallpaper = {
   id: string;
   archive_message_ids: string | null;
@@ -124,6 +133,10 @@ const ARCHIVE_SETUP_MARKER = "#wallpaperbot-archive-setup";
 const PUBLIC_CHANNEL_SETUP_MARKER = "#wallpaperbot-public-setup";
 const CHANNEL_SETUP_LIFETIME_MS = 10 * 60 * 1000;
 const CHANNEL_HANDLE = "@LycoRyco_Wallpapers";
+const QUEUE_BUTTON = "📋 Queue";
+const HELP_BUTTON = "ℹ️ Help";
+const CLEAR_QUEUE_BUTTON = "🗑 Clear queue";
+const CONNECT_CHANNEL_BUTTON = "🔗 Connect channel";
 
 export default {
   async fetch(request: Request, env: BotEnv, ctx: ExecutionContext): Promise<Response> {
@@ -253,32 +266,34 @@ async function handleOwnerMessage(
     return;
   }
 
-  if (text === "/start" || text === "/help") {
+  if (text === "/start" || text === "/help" || text === HELP_BUTTON) {
+    await ensureOwnerCommandMenu(env);
     await sendTelegramMessage(
       env,
       chatId,
       [
         "WallpaperBot is connected.",
         "",
-        "Soon you will be able to send a public X (Twitter) image-post link here and the bot will queue it automatically.",
+        "Send a public X (Twitter) image-post link and I will archive, preview, and schedule it automatically.",
         "",
-        "Commands available now:",
+        "Quick controls:",
         "/start — show this message",
-        "/help — show this message",
         "/queue — view the current queue",
         "/clearqueue — permanently clear queued items",
         "/connectpublic — connect a public channel with a one-time code",
+        "/connectarchive — connect the private archive channel with a one-time code",
       ].join("\n"),
+      ownerReplyKeyboard(),
     );
     return;
   }
 
-  if (text === "/queue") {
+  if (text === "/queue" || text === QUEUE_BUTTON) {
     await sendTelegramMessage(env, chatId, await buildQueueMessage(env));
     return;
   }
 
-  if (text === "/clearqueue") {
+  if (text === "/clearqueue" || text === CLEAR_QUEUE_BUTTON) {
     await sendTelegramMessage(
       env,
       chatId,
@@ -291,7 +306,7 @@ async function handleOwnerMessage(
     return;
   }
 
-  if (text === "/connectpublic") {
+  if (text === "/connectpublic" || text === CONNECT_CHANNEL_BUTTON) {
     await requestChannelConnection("public", chatId, env);
     return;
   }
@@ -312,6 +327,36 @@ async function handleOwnerMessage(
     chatId,
     "Send a direct public X (Twitter) post link containing images, or use /help.",
   );
+}
+
+function ownerReplyKeyboard(): TelegramReplyKeyboard {
+  return {
+    keyboard: [
+      [QUEUE_BUTTON, HELP_BUTTON],
+      [CLEAR_QUEUE_BUTTON, CONNECT_CHANNEL_BUTTON],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+    input_field_placeholder: "Send an X wallpaper post link…",
+  };
+}
+
+async function ensureOwnerCommandMenu(env: BotEnv): Promise<void> {
+  try {
+    await telegramApi(env, "setMyCommands", {
+      scope: { type: "chat", chat_id: Number(env.OWNER_TELEGRAM_USER_ID) },
+      commands: [
+        { command: "start", description: "Show the bot controls" },
+        { command: "queue", description: "View the wallpaper queue" },
+        { command: "clearqueue", description: "Permanently clear the queue" },
+        { command: "connectpublic", description: "Connect the public channel" },
+        { command: "connectarchive", description: "Connect the private archive" },
+        { command: "help", description: "Show help" },
+      ],
+    });
+  } catch (error) {
+    console.error("Could not set the owner command menu", error);
+  }
 }
 
 async function handleChannelSetup(update: TelegramUpdate, env: BotEnv): Promise<void> {
@@ -1626,7 +1671,7 @@ async function sendTelegramMessage(
   env: BotEnv,
   chatId: number | string,
   text: string,
-  replyMarkup?: TelegramInlineKeyboard,
+  replyMarkup?: TelegramReplyMarkup,
 ): Promise<boolean> {
   try {
     await telegramApi(env, "sendMessage", {
