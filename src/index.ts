@@ -5,6 +5,7 @@ interface BotEnv extends Env {
   TELEGRAM_WEBHOOK_SECRET: string;
   WEBHOOK_SETUP_SECRET: string;
   OWNER_TELEGRAM_USER_ID: string;
+  CHANNEL_HANDLE?: string;
 }
 
 type TelegramUpdate = {
@@ -138,7 +139,7 @@ const TELEGRAM_SETUP_PATH = "/internal/register-webhook";
 const ARCHIVE_SETUP_MARKER = "#wallpaperbot-archive-setup";
 const PUBLIC_CHANNEL_SETUP_MARKER = "#wallpaperbot-public-setup";
 const CHANNEL_SETUP_LIFETIME_MS = 10 * 60 * 1000;
-const CHANNEL_HANDLE = "@LycoRyco_Wallpapers";
+const DEFAULT_CHANNEL_HANDLE = "@LycoRyco_Wallpapers";
 const QUEUE_BUTTON = "📋 Queue";
 const HELP_BUTTON = "ℹ️ Help";
 const CLEAR_QUEUE_BUTTON = "🗑 Clear queue";
@@ -987,7 +988,11 @@ async function sendScheduledPreview(wallpaperId: string, env: BotEnv): Promise<v
   )
     .bind(wallpaperId)
     .all<PreviewMedia>();
-  const caption = buildChannelCaption(wallpaper.artist_handle, wallpaper.source_url);
+  const caption = buildChannelCaption(
+    wallpaper.artist_handle,
+    wallpaper.source_url,
+    configuredChannelHandle(env),
+  );
 
   let visualSent = false;
   try {
@@ -1031,7 +1036,7 @@ function previewControls(wallpaperId: string): TelegramInlineKeyboard {
   };
 }
 
-function buildChannelCaption(artistHandle: string, sourceUrl: string): string {
+function buildChannelCaption(artistHandle: string, sourceUrl: string, channelHandle: string): string {
   const safeArtist = escapeHtml(artistHandle);
   const safeSource = escapeHtml(sourceUrl);
   return [
@@ -1039,8 +1044,12 @@ function buildChannelCaption(artistHandle: string, sourceUrl: string): string {
     "Wallpaper Source: X (Twitter)",
     `Link: ${safeSource}`,
     "",
-    CHANNEL_HANDLE,
+    channelHandle,
   ].join("\n");
+}
+
+function configuredChannelHandle(env: BotEnv): string {
+  return env.CHANNEL_HANDLE?.trim() || DEFAULT_CHANNEL_HANDLE;
 }
 
 function escapeHtml(value: string): string {
@@ -1622,7 +1631,12 @@ async function publishWallpaper(
 
     let photoIds = parseMessageIds(wallpaper.published_photo_message_ids);
     if (photoIds.length === 0) {
-      photoIds = await sendPublicPhotos(env, publicChannelId, media.results.map((item) => item.preview_url), buildChannelCaption(wallpaper.artist_handle, wallpaper.source_url));
+      photoIds = await sendPublicPhotos(
+        env,
+        publicChannelId,
+        media.results.map((item) => item.preview_url),
+        buildChannelCaption(wallpaper.artist_handle, wallpaper.source_url, configuredChannelHandle(env)),
+      );
       await env.WALLPAPERBOT_DB.prepare(
         "UPDATE wallpapers SET published_photo_message_ids = ? WHERE id = ?",
       ).bind(JSON.stringify(photoIds), wallpaperId).run();
@@ -1634,6 +1648,7 @@ async function publishWallpaper(
         env,
         publicChannelId,
         media.results.map((item) => item.archive_file_id),
+        configuredChannelHandle(env),
       );
       await env.WALLPAPERBOT_DB.prepare(
         "UPDATE wallpapers SET published_document_message_ids = ? WHERE id = ?",
@@ -1721,13 +1736,14 @@ async function sendPublicDocuments(
   env: BotEnv,
   channelId: string,
   fileIds: string[],
+  channelHandle: string,
 ): Promise<number[]> {
   const method = fileIds.length === 1 ? "sendDocument" : "sendMediaGroup";
   const result = await telegramApi(env, method, fileIds.length === 1
     ? {
       chat_id: channelId,
       document: fileIds[0],
-      caption: CHANNEL_HANDLE,
+      caption: channelHandle,
       disable_notification: true,
     }
     : {
@@ -1736,7 +1752,7 @@ async function sendPublicDocuments(
       media: fileIds.map((fileId, index) => ({
         type: "document",
         media: fileId,
-        ...(index === fileIds.length - 1 ? { caption: CHANNEL_HANDLE } : {}),
+        ...(index === fileIds.length - 1 ? { caption: channelHandle } : {}),
       })),
     });
   const messages = Array.isArray(result) ? result : [result];

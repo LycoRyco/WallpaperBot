@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "wallpaperbot",
+  "name": "your-wallpaperbot",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-08",
   "workers_dev": true,
@@ -9,13 +9,13 @@
   },
   "vars": {
     "FXEMBED_API_BASE_URL": "https://api.fxtwitter.com",
-    "CHANNEL_HANDLE": "@LycoRyco_Wallpapers"
+    "CHANNEL_HANDLE": "@YourWallpaperChannel"
   },
   "d1_databases": [
     {
       "binding": "WALLPAPERBOT_DB",
-      "database_name": "wallpaperbot-db",
-      "database_id": "498b82e1-3a59-4b4d-98f9-71df8c44b94d"
+      "database_name": "your-wallpaperbot-db",
+      "database_id": "PASTE_YOUR_D1_DATABASE_UUID_HERE"
     }
   ]
 }

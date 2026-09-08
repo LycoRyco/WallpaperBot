@@ -27,6 +27,8 @@ Send `/start` in the bot chat to show the persistent keyboard and owner command 
 
 For the full command list and operational notes, see [the daily-use guide](docs/operations.md).
 
+Want to run your own independent bot? Follow the [deployment guide](docs/deployment.md).
+
 ## Public post format
 
 ```text
@@ -61,6 +63,7 @@ src/                 Worker and bot logic
 migrations/          Versioned D1 schema
 docs/architecture.md System design and data flow
 docs/operations.md   Daily use, commands, and channel setup
+docs/deployment.md   New-user Cloudflare and Telegram deployment guide
 docs/build-roadmap.md Historical implementation record
 ```
 
@@ -73,3 +76,7 @@ npm run deploy
 ```
 
 Never commit real secrets. `.env.example` lists only the required secret names.
+
+## License
+
+Released under the [MIT License](LICENSE). You may use, modify, and deploy your own version.
