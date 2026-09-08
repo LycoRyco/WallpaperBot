@@ -2,10 +2,20 @@ interface BotEnv extends Env {
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_WEBHOOK_SECRET: string;
   WEBHOOK_SETUP_SECRET: string;
+  OWNER_TELEGRAM_USER_ID: string;
 }
 
 type TelegramUpdate = {
   update_id: number;
+  message?: {
+    from?: {
+      id: number;
+    };
+    chat?: {
+      id: number;
+    };
+    text?: string;
+  };
 };
 
 const TELEGRAM_WEBHOOK_PATH = "/telegram/webhook";
@@ -54,8 +64,7 @@ async function handleTelegramWebhook(request: Request, env: BotEnv): Promise<Res
     return new Response("Invalid Telegram update", { status: 400 });
   }
 
-  // The next stage adds owner-only command processing here.
-  console.log(`Received Telegram update ${update.update_id}`);
+  await handleOwnerMessage(update, env);
   return new Response("OK");
 }
 
@@ -96,4 +105,66 @@ function isTelegramUpdate(value: unknown): value is TelegramUpdate {
     "update_id" in value &&
     typeof value.update_id === "number"
   );
+}
+
+async function handleOwnerMessage(update: TelegramUpdate, env: BotEnv): Promise<void> {
+  const message = update.message;
+  const senderId = message?.from?.id;
+  const chatId = message?.chat?.id;
+  const text = message?.text?.trim();
+
+  if (senderId === undefined || chatId === undefined || text === undefined) {
+    return;
+  }
+
+  // This bot is personal-use only. Do not reveal its capabilities to other users.
+  if (String(senderId) !== env.OWNER_TELEGRAM_USER_ID) {
+    console.warn(`Ignored update ${update.update_id} from an unauthorized sender.`);
+    return;
+  }
+
+  if (text === "/start" || text === "/help") {
+    await sendTelegramMessage(
+      env,
+      chatId,
+      [
+        "WallpaperBot is connected.",
+        "",
+        "Soon you will be able to send a public X (Twitter) image-post link here and the bot will queue it automatically.",
+        "",
+        "Commands available now:",
+        "/start — show this message",
+        "/help — show this message",
+        "/queue — view the queue (coming next)",
+      ].join("\n"),
+    );
+    return;
+  }
+
+  if (text === "/queue") {
+    await sendTelegramMessage(
+      env,
+      chatId,
+      "Your queue is not set up yet. The next build step adds it.",
+    );
+  }
+}
+
+async function sendTelegramMessage(
+  env: BotEnv,
+  chatId: number,
+  text: string,
+): Promise<void> {
+  const response = await fetch(
+    `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text }),
+    },
+  );
+
+  if (!response.ok) {
+    console.error("Telegram sendMessage failed", await response.text());
+  }
 }
