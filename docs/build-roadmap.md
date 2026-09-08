@@ -35,6 +35,13 @@ You will be guided through:
 
 No token will ever be pasted into source code or committed to Git.
 
+Completed:
+
+- Cloudflare Worker deployed at the project's `workers.dev` address.
+- Free D1 database created and bound to the Worker.
+- Telegram bot token stored as an encrypted Cloudflare secret.
+- Telegram webhook registered with request verification enabled.
+
 ## Stage 3 — Basic secure bot
 
 **Purpose:** Confirm that Telegram can reach the Worker safely.

@@ -152,6 +152,7 @@ The final database schema will contain at least:
 ## Security rules
 
 - The bot token is stored only as a Cloudflare secret.
+- Telegram webhook requests carry a second Cloudflare secret header, so forged requests are rejected.
 - The owner Telegram user ID is stored as configuration and checked on every update.
 - Channel IDs are stored as configuration, not hard-coded in source code.
 - `.env` files are ignored by Git.
