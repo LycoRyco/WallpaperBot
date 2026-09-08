@@ -60,6 +60,17 @@ type OccupiedSlot = {
   scheduled_for: string;
 };
 
+type PreviewWallpaper = {
+  id: string;
+  artist_handle: string;
+  source_url: string;
+  scheduled_for: string;
+};
+
+type PreviewMedia = {
+  preview_url: string;
+};
+
 type XPostLink = {
   postId: string;
   canonicalUrl: string;
@@ -271,6 +282,7 @@ async function setBotSetting(
 
 async function buildQueueMessage(env: BotEnv): Promise<string> {
   await assignSlotsForArchivedWallpapers(env);
+  await sendMissingPreviews(env);
   const result = await env.WALLPAPERBOT_DB.prepare(
     `SELECT artist_handle, source_url, status, scheduled_for
      FROM wallpapers
@@ -602,6 +614,7 @@ async function assignNextAvailableSlot(
       )
         .bind(wallpaperId, JSON.stringify({ scheduledFor: value }))
         .run();
+      await sendScheduledPreview(wallpaperId, env);
       return value;
     } catch {
       // The unique D1 index wins a rare simultaneous assignment race.
@@ -610,6 +623,107 @@ async function assignNextAvailableSlot(
   }
 
   return null;
+}
+
+async function sendMissingPreviews(env: BotEnv): Promise<void> {
+  const missing = await env.WALLPAPERBOT_DB.prepare(
+    `SELECT w.id FROM wallpapers w
+     WHERE w.status = 'scheduled' AND w.scheduled_for IS NOT NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM wallpaper_events e
+         WHERE e.wallpaper_id = w.id AND e.event_type = 'preview_sent'
+       )`,
+  ).all<WallpaperId>();
+  for (const wallpaper of missing.results) {
+    await sendScheduledPreview(wallpaper.id, env);
+  }
+}
+
+async function sendScheduledPreview(wallpaperId: string, env: BotEnv): Promise<void> {
+  const alreadySent = await env.WALLPAPERBOT_DB.prepare(
+    "SELECT id FROM wallpaper_events WHERE wallpaper_id = ? AND event_type = 'preview_sent' LIMIT 1",
+  )
+    .bind(wallpaperId)
+    .first<{ id: number }>();
+  if (alreadySent) return;
+
+  const wallpaper = await env.WALLPAPERBOT_DB.prepare(
+    `SELECT id, artist_handle, source_url, scheduled_for FROM wallpapers
+     WHERE id = ? AND artist_handle IS NOT NULL AND scheduled_for IS NOT NULL`,
+  )
+    .bind(wallpaperId)
+    .first<PreviewWallpaper>();
+  if (!wallpaper) return;
+
+  const media = await env.WALLPAPERBOT_DB.prepare(
+    "SELECT preview_url FROM media WHERE wallpaper_id = ? ORDER BY source_position",
+  )
+    .bind(wallpaperId)
+    .all<PreviewMedia>();
+  const caption = buildChannelCaption(wallpaper.artist_handle, wallpaper.source_url);
+
+  try {
+    await sendPreviewImages(env, media.results.map((item) => item.preview_url), caption);
+  } catch (error) {
+    console.warn("Visual preview could not be sent", error);
+  }
+
+  const text = [
+    "Wallpaper preview",
+    `Scheduled: ${formatTehranTime(wallpaper.scheduled_for)} Tehran time`,
+    `Images: ${media.results.length}`,
+    "",
+    "The visual preview and exact channel caption are shown above.",
+  ].join("\n");
+  const sent = await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, text);
+  if (sent) {
+    await env.WALLPAPERBOT_DB.prepare(
+      "INSERT INTO wallpaper_events (wallpaper_id, event_type) VALUES (?, 'preview_sent')",
+    )
+      .bind(wallpaperId)
+      .run();
+  }
+}
+
+function buildChannelCaption(artistHandle: string, sourceUrl: string): string {
+  const safeArtist = escapeHtml(artistHandle);
+  const safeSource = escapeHtml(sourceUrl);
+  return [
+    `Artist: <a href="https://x.com/${safeArtist}">${safeArtist}</a>`,
+    "Wallpaper Source: X (Twitter)",
+    `Link: ${safeSource}`,
+    "",
+    "@LycoRyco_Wallpapers",
+  ].join("\n");
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[character] ?? character);
+}
+
+async function sendPreviewImages(env: BotEnv, urls: string[], caption: string): Promise<void> {
+  if (urls.length === 0) return;
+  const previewUrls = urls.map((value) => {
+    const url = new URL(value);
+    url.searchParams.set("name", "large");
+    return url.toString();
+  });
+  const endpoint = previewUrls.length === 1 ? "sendPhoto" : "sendMediaGroup";
+  const body = previewUrls.length === 1
+    ? { chat_id: env.OWNER_TELEGRAM_USER_ID, photo: previewUrls[0], caption, parse_mode: "HTML" }
+    : {
+      chat_id: env.OWNER_TELEGRAM_USER_ID,
+      media: previewUrls.map((url, index) => ({
+        type: "photo", media: url,
+        ...(index === 0 ? { caption, parse_mode: "HTML" } : {}),
+      })),
+    };
+  const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${endpoint}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error(`Telegram ${endpoint} failed`);
 }
 
 function futureTehranSlots(now: Date): Date[] {
@@ -870,7 +984,7 @@ async function sendTelegramMessage(
   env: BotEnv,
   chatId: number | string,
   text: string,
-): Promise<void> {
+): Promise<boolean> {
   const response = await fetch(
     `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
     {
@@ -882,5 +996,7 @@ async function sendTelegramMessage(
 
   if (!response.ok) {
     console.error("Telegram sendMessage failed", await response.text());
+    return false;
   }
+  return true;
 }
