@@ -1380,7 +1380,7 @@ async function publishWallpaper(
     ).bind(
       retryAt ? "scheduled" : "failed",
       attemptNumber,
-      retryAt ? new Date(Date.now() + 30 * 60 * 1000).toISOString() : null,
+      retryAt ? new Date(Date.now() + 10 * 60 * 1000).toISOString() : null,
       message,
       wallpaperId,
     ).run();
@@ -1388,7 +1388,7 @@ async function publishWallpaper(
       env,
       env.OWNER_TELEGRAM_USER_ID,
       retryAt
-        ? `Could not publish this wallpaper. I will retry in 30 minutes (attempt ${attemptNumber} of 3): ${message}`
+        ? `Could not publish this wallpaper. I will retry in 10 minutes (attempt ${attemptNumber} of 3): ${message}`
         : `Could not publish this wallpaper after 3 attempts: ${message}`,
     );
   }
