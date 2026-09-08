@@ -102,6 +102,16 @@ type ClearableWallpaper = {
   archive_message_ids: string | null;
 };
 
+type RetryableExtraction = {
+  id: string;
+  x_post_id: string;
+};
+
+type FailureOutcome = {
+  attemptNumber: number;
+  willRetry: boolean;
+};
+
 type XPostLink = {
   postId: string;
   canonicalUrl: string;
@@ -135,6 +145,7 @@ export default {
   },
   async scheduled(_controller: ScheduledController, env: BotEnv, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(processDuePublications(env));
+    ctx.waitUntil(processDueExtractions(env));
   },
 } satisfies ExportedHandler<BotEnv>;
 
@@ -621,8 +632,8 @@ async function extractAndStoreMetadata(
       error instanceof FxEmbedError
         ? error
         : new FxEmbedError("An unexpected extraction error occurred.", true);
-    await recordExtractionFailure(wallpaperId, extractionError, env);
-    await sendTelegramMessage(env, chatId, `Could not process this X post: ${extractionError.message}`);
+    const outcome = await recordExtractionFailure(wallpaperId, extractionError, env);
+    await notifyExtractionFailure(chatId, extractionError, outcome, env);
   }
 }
 
@@ -648,8 +659,8 @@ async function recoverExistingExtraction(
     await sendTelegramMessage(env, chatId, "The missing archive uploads have been recovered.");
   } catch (error) {
     const archiveError = toArchiveError(error);
-    await recordExtractionFailure(wallpaperId, archiveError, env);
-    await sendTelegramMessage(env, chatId, `Could not archive this X post: ${archiveError.message}`);
+    const outcome = await recordExtractionFailure(wallpaperId, archiveError, env);
+    await notifyExtractionFailure(chatId, archiveError, outcome, env);
   }
 }
 
@@ -1140,21 +1151,54 @@ async function recordExtractionFailure(
   wallpaperId: string,
   error: FxEmbedError,
   env: BotEnv,
-): Promise<void> {
-  const nextRetrySql = error.retryable
-    ? "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+30 minutes')"
-    : "NULL";
+): Promise<FailureOutcome> {
+  const wallpaper = await env.WALLPAPERBOT_DB.prepare(
+    "SELECT retry_count FROM wallpapers WHERE id = ?",
+  )
+    .bind(wallpaperId)
+    .first<{ retry_count: number }>();
+  const attemptNumber = (wallpaper?.retry_count ?? 0) + 1;
+  const willRetry = error.retryable && attemptNumber < 3;
   await env.WALLPAPERBOT_DB.batch([
     env.WALLPAPERBOT_DB.prepare(
       `UPDATE wallpapers
-       SET status = 'failed', last_error = ?, next_retry_at = ${nextRetrySql},
+       SET status = 'failed', retry_count = ?, last_error = ?, next_retry_at = ?,
            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
        WHERE id = ?`,
-    ).bind(error.message, wallpaperId),
+    ).bind(
+      attemptNumber,
+      error.message,
+      willRetry ? new Date(Date.now() + 10 * 60 * 1000).toISOString() : null,
+      wallpaperId,
+    ),
     env.WALLPAPERBOT_DB.prepare(
       "INSERT INTO wallpaper_events (wallpaper_id, event_type, details_json) VALUES (?, 'extraction_failed', ?)",
-    ).bind(wallpaperId, JSON.stringify({ retryable: error.retryable, message: error.message })),
+    ).bind(wallpaperId, JSON.stringify({ retryable: error.retryable, message: error.message, attemptNumber })),
   ]);
+  return { attemptNumber, willRetry };
+}
+
+async function notifyExtractionFailure(
+  chatId: number,
+  error: FxEmbedError,
+  outcome: FailureOutcome,
+  env: BotEnv,
+): Promise<void> {
+  if (outcome.willRetry) {
+    if (outcome.attemptNumber === 1) {
+      await sendTelegramMessage(
+        env,
+        chatId,
+        `Could not process this X post yet. I will retry automatically in 10 minutes (attempt 1 of 3): ${error.message}`,
+      );
+    }
+    return;
+  }
+
+  const reason = error.retryable
+    ? `after ${outcome.attemptNumber} attempts`
+    : "because this error cannot be retried automatically";
+  await sendTelegramMessage(env, chatId, `Could not process this X post ${reason}: ${error.message}`);
 }
 
 async function sendRescheduleChoices(wallpaperId: string, env: BotEnv): Promise<void> {
@@ -1305,6 +1349,38 @@ async function processDuePublications(env: BotEnv): Promise<void> {
 
   for (const wallpaper of due.results) {
     await publishWallpaper(wallpaper.id, env, true);
+  }
+}
+
+async function processDueExtractions(env: BotEnv): Promise<void> {
+  const now = new Date().toISOString();
+  const failed = await env.WALLPAPERBOT_DB.prepare(
+    `SELECT id, x_post_id FROM wallpapers
+     WHERE status = 'failed' AND next_retry_at IS NOT NULL AND next_retry_at <= ?
+       AND retry_count < 3
+     ORDER BY next_retry_at
+     LIMIT 5`,
+  )
+    .bind(now)
+    .all<RetryableExtraction>();
+
+  for (const wallpaper of failed.results) {
+    const claimed = await env.WALLPAPERBOT_DB.prepare(
+      `UPDATE wallpapers
+       SET status = 'extracting', next_retry_at = NULL,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+       WHERE id = ? AND status = 'failed'`,
+    )
+      .bind(wallpaper.id)
+      .run();
+    if (claimed.meta.changes === 1) {
+      await recoverExistingExtraction(
+        wallpaper.id,
+        wallpaper.x_post_id,
+        Number(env.OWNER_TELEGRAM_USER_ID),
+        env,
+      );
+    }
   }
 }
 
