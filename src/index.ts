@@ -117,6 +117,12 @@ type RetryableExtraction = {
   x_post_id: string;
 };
 
+type PublishedHistoryItem = {
+  id: string;
+  artist_handle: string | null;
+  updated_at: string;
+};
+
 type FailureOutcome = {
   attemptNumber: number;
   willRetry: boolean;
@@ -280,6 +286,7 @@ async function handleOwnerMessage(
         "/start — show this message",
         "/queue — view the current queue",
         "/clearqueue — permanently clear queued items",
+        "/clearpublished — allow one of the last three posts to be reused",
         "/connectpublic — connect a public channel with a one-time code",
         "/connectarchive — connect the private archive channel with a one-time code",
       ].join("\n"),
@@ -303,6 +310,11 @@ async function handleOwnerMessage(
         { text: "Keep the queue", callback_data: "q:keep" },
       ]] },
     );
+    return;
+  }
+
+  if (text === "/clearpublished") {
+    await showPublishedHistoryChoices(chatId, env);
     return;
   }
 
@@ -349,6 +361,7 @@ async function ensureOwnerCommandMenu(env: BotEnv): Promise<void> {
         { command: "start", description: "Show the bot controls" },
         { command: "queue", description: "View the wallpaper queue" },
         { command: "clearqueue", description: "Permanently clear the queue" },
+        { command: "clearpublished", description: "Reuse one of the last three posts" },
         { command: "connectpublic", description: "Connect the public channel" },
         { command: "connectarchive", description: "Connect the private archive" },
         { command: "help", description: "Show help" },
@@ -492,6 +505,25 @@ async function handleCallbackQuery(
     return;
   }
 
+  if (action === "h") {
+    const wallpaper = await getControlWallpaper(wallpaperId, env);
+    if (!wallpaper || wallpaper.status !== "published") {
+      await answerCallbackQuery(env, callbackId, "That published-history entry is no longer available.");
+      return;
+    }
+    await answerCallbackQuery(env, callbackId);
+    await sendTelegramMessage(
+      env,
+      env.OWNER_TELEGRAM_USER_ID,
+      "Allow this X post to be submitted again? This removes only the bot’s published-history record. The public post and private archive files stay untouched.",
+      { inline_keyboard: [[
+        { text: "Yes, allow reuse", callback_data: `d:${wallpaperId}` },
+        { text: "Keep its history", callback_data: `k:${wallpaperId}` },
+      ]] },
+    );
+    return;
+  }
+
   if (action === "k") {
     await answerCallbackQuery(env, callbackId, "Wallpaper kept.");
     return;
@@ -500,6 +532,12 @@ async function handleCallbackQuery(
   if (action === "x") {
     await answerCallbackQuery(env, callbackId, "Canceling wallpaper…");
     ctx.waitUntil(cancelWallpaper(wallpaperId, env));
+    return;
+  }
+
+  if (action === "d") {
+    await answerCallbackQuery(env, callbackId, "Removing published-history record…");
+    ctx.waitUntil(forgetPublishedWallpaper(wallpaperId, env));
     return;
   }
 
@@ -1456,6 +1494,46 @@ async function clearQueuedWallpapers(env: BotEnv): Promise<void> {
     console.error("Queue clearing failed", error);
     await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "The queue could not be fully cleared. Nothing else was deleted automatically.");
   }
+}
+
+async function showPublishedHistoryChoices(chatId: number, env: BotEnv): Promise<void> {
+  const published = await env.WALLPAPERBOT_DB.prepare(
+    `SELECT id, artist_handle, updated_at FROM wallpapers
+     WHERE status = 'published' ORDER BY updated_at DESC LIMIT 3`,
+  ).all<PublishedHistoryItem>();
+  if (published.results.length === 0) {
+    await sendTelegramMessage(env, chatId, "There are no published-history records to clear.");
+    return;
+  }
+  await sendTelegramMessage(
+    env,
+    chatId,
+    "Choose a published wallpaper to allow for reuse:",
+    {
+      inline_keyboard: published.results.map((wallpaper) => [{
+        text: `${wallpaper.artist_handle ?? "Unknown artist"} — ${formatTehranTime(wallpaper.updated_at)}`,
+        callback_data: `h:${wallpaper.id}`,
+      }]),
+    },
+  );
+}
+
+async function forgetPublishedWallpaper(wallpaperId: string, env: BotEnv): Promise<void> {
+  const wallpaper = await getControlWallpaper(wallpaperId, env);
+  if (!wallpaper || wallpaper.status !== "published") {
+    await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "That published-history entry is no longer available.");
+    return;
+  }
+  await env.WALLPAPERBOT_DB.batch([
+    env.WALLPAPERBOT_DB.prepare("DELETE FROM wallpaper_events WHERE wallpaper_id = ?").bind(wallpaperId),
+    env.WALLPAPERBOT_DB.prepare("DELETE FROM media WHERE wallpaper_id = ?").bind(wallpaperId),
+    env.WALLPAPERBOT_DB.prepare("DELETE FROM wallpapers WHERE id = ?").bind(wallpaperId),
+  ]);
+  await sendTelegramMessage(
+    env,
+    env.OWNER_TELEGRAM_USER_ID,
+    "Published-history record removed. You can submit that X post again.",
+  );
 }
 
 async function processDuePublications(env: BotEnv): Promise<void> {
