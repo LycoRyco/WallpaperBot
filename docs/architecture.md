@@ -148,6 +148,7 @@ The final database schema will contain at least:
 | `media` | One record per image: original URL, preview URL, original filename, source ordering, and private archive Telegram file ID. |
 | `counters` | The next filename number for each artist handle. |
 | `events` | A small audit trail for submission, retry, reschedule, cancellation, and publishing events. |
+| `processed_telegram_updates` | Prevents Telegram webhook retries from processing the same update twice. |
 
 ## Security rules
 

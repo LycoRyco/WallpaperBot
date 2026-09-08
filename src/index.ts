@@ -18,6 +18,13 @@ type TelegramUpdate = {
   };
 };
 
+type QueuedWallpaper = {
+  artist_handle: string | null;
+  source_url: string;
+  status: string;
+  scheduled_for: string | null;
+};
+
 const TELEGRAM_WEBHOOK_PATH = "/telegram/webhook";
 const TELEGRAM_SETUP_PATH = "/internal/register-webhook";
 
@@ -123,6 +130,10 @@ async function handleOwnerMessage(update: TelegramUpdate, env: BotEnv): Promise<
     return;
   }
 
+  if (!(await claimTelegramUpdate(update.update_id, env))) {
+    return;
+  }
+
   if (text === "/start" || text === "/help") {
     await sendTelegramMessage(
       env,
@@ -142,12 +153,51 @@ async function handleOwnerMessage(update: TelegramUpdate, env: BotEnv): Promise<
   }
 
   if (text === "/queue") {
-    await sendTelegramMessage(
-      env,
-      chatId,
-      "Your queue is not set up yet. The next build step adds it.",
-    );
+    await sendTelegramMessage(env, chatId, await buildQueueMessage(env));
   }
+}
+
+async function claimTelegramUpdate(updateId: number, env: BotEnv): Promise<boolean> {
+  const result = await env.WALLPAPERBOT_DB.prepare(
+    "INSERT OR IGNORE INTO processed_telegram_updates (update_id) VALUES (?)",
+  )
+    .bind(updateId)
+    .run();
+
+  return result.meta.changes === 1;
+}
+
+async function buildQueueMessage(env: BotEnv): Promise<string> {
+  const result = await env.WALLPAPERBOT_DB.prepare(
+    `SELECT artist_handle, source_url, status, scheduled_for
+     FROM wallpapers
+     WHERE status IN ('extracting', 'scheduled', 'publishing', 'failed')
+     ORDER BY scheduled_for IS NULL, scheduled_for, created_at
+     LIMIT 10`,
+  ).all<QueuedWallpaper>();
+
+  if (result.results.length === 0) {
+    return "Your wallpaper queue is empty.";
+  }
+
+  const entries = result.results.map((wallpaper, index) => {
+    const artist = wallpaper.artist_handle ?? "Unknown artist";
+    const when = wallpaper.scheduled_for
+      ? formatTehranTime(wallpaper.scheduled_for)
+      : "Awaiting extraction";
+    return `${index + 1}. ${artist} — ${when} (${wallpaper.status})`;
+  });
+
+  return ["Wallpaper queue", "", ...entries].join("\n");
+}
+
+function formatTehranTime(value: string): string {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Tehran",
+    dateStyle: "medium",
+    timeStyle: "short",
+    hour12: false,
+  }).format(new Date(value));
 }
 
 async function sendTelegramMessage(
