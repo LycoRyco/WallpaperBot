@@ -1,3 +1,5 @@
+import { extractXPost, FxEmbedError } from "./fxembed";
+
 interface BotEnv extends Env {
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_WEBHOOK_SECRET: string;
@@ -40,7 +42,7 @@ const TELEGRAM_WEBHOOK_PATH = "/telegram/webhook";
 const TELEGRAM_SETUP_PATH = "/internal/register-webhook";
 
 export default {
-  async fetch(request: Request, env: BotEnv): Promise<Response> {
+  async fetch(request: Request, env: BotEnv, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/") {
@@ -51,7 +53,7 @@ export default {
     }
 
     if (request.method === "POST" && url.pathname === TELEGRAM_WEBHOOK_PATH) {
-      return handleTelegramWebhook(request, env);
+      return handleTelegramWebhook(request, env, ctx);
     }
 
     if (request.method === "POST" && url.pathname === TELEGRAM_SETUP_PATH) {
@@ -62,7 +64,11 @@ export default {
   },
 } satisfies ExportedHandler<BotEnv>;
 
-async function handleTelegramWebhook(request: Request, env: BotEnv): Promise<Response> {
+async function handleTelegramWebhook(
+  request: Request,
+  env: BotEnv,
+  ctx: ExecutionContext,
+): Promise<Response> {
   const verificationToken = request.headers.get(
     "X-Telegram-Bot-Api-Secret-Token",
   );
@@ -82,7 +88,7 @@ async function handleTelegramWebhook(request: Request, env: BotEnv): Promise<Res
     return new Response("Invalid Telegram update", { status: 400 });
   }
 
-  await handleOwnerMessage(update, env);
+  await handleOwnerMessage(update, env, ctx);
   return new Response("OK");
 }
 
@@ -125,7 +131,11 @@ function isTelegramUpdate(value: unknown): value is TelegramUpdate {
   );
 }
 
-async function handleOwnerMessage(update: TelegramUpdate, env: BotEnv): Promise<void> {
+async function handleOwnerMessage(
+  update: TelegramUpdate,
+  env: BotEnv,
+  ctx: ExecutionContext,
+): Promise<void> {
   const message = update.message;
   const senderId = message?.from?.id;
   const chatId = message?.chat?.id;
@@ -170,7 +180,7 @@ async function handleOwnerMessage(update: TelegramUpdate, env: BotEnv): Promise<
 
   const xPost = parseXPostLink(text);
   if (xPost) {
-    await sendTelegramMessage(env, chatId, await receiveXPost(xPost, env));
+    await sendTelegramMessage(env, chatId, await receiveXPost(xPost, env, chatId, ctx));
     return;
   }
 
@@ -259,7 +269,12 @@ function parseXPostLink(text: string): XPostLink | null {
   };
 }
 
-async function receiveXPost(xPost: XPostLink, env: BotEnv): Promise<string> {
+async function receiveXPost(
+  xPost: XPostLink,
+  env: BotEnv,
+  chatId: number,
+  ctx: ExecutionContext,
+): Promise<string> {
   const existing = await env.WALLPAPERBOT_DB.prepare(
     "SELECT id, status, scheduled_for FROM wallpapers WHERE x_post_id = ?",
   )
@@ -279,6 +294,7 @@ async function receiveXPost(xPost: XPostLink, env: BotEnv): Promise<string> {
           "INSERT INTO wallpaper_events (wallpaper_id, event_type) VALUES (?, 'retry_requested')",
         ).bind(existing.id),
       ]);
+      ctx.waitUntil(extractAndStoreMetadata(existing.id, xPost.postId, chatId, env));
       return "That post previously failed. Its extraction retry cycle has been restarted.";
     }
 
@@ -299,11 +315,124 @@ async function receiveXPost(xPost: XPostLink, env: BotEnv): Promise<string> {
     ).bind(wallpaperId),
   ]);
 
+  ctx.waitUntil(extractAndStoreMetadata(wallpaperId, xPost.postId, chatId, env));
+
   return [
-    "X post saved to the queue.",
+    "X post accepted.",
     "",
-    "Image extraction and automatic slot selection are the next build feature, so this test item is currently awaiting extraction.",
+    "I’m checking its media now. A schedule slot will be assigned only after every image has been safely archived.",
   ].join("\n");
+}
+
+async function extractAndStoreMetadata(
+  wallpaperId: string,
+  postId: string,
+  chatId: number,
+  env: BotEnv,
+): Promise<void> {
+  try {
+    const extracted = await extractXPost(postId, env.FXEMBED_API_BASE_URL);
+    const filenameNumber = await allocateFilenameNumber(extracted.artistHandle, env);
+    const mediaStatements = extracted.images.map((image, position) => {
+      const filename = buildFilename(
+        extracted.artistHandle,
+        filenameNumber,
+        position,
+        extracted.images.length,
+        image.originalUrl,
+      );
+      return env.WALLPAPERBOT_DB.prepare(
+        `INSERT INTO media (
+          id, wallpaper_id, source_position, original_url, preview_url, filename
+        ) VALUES (?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        crypto.randomUUID(),
+        wallpaperId,
+        position,
+        image.originalUrl,
+        image.originalUrl,
+        filename,
+      );
+    });
+
+    await env.WALLPAPERBOT_DB.batch([
+      env.WALLPAPERBOT_DB.prepare(
+        `UPDATE wallpapers
+         SET artist_handle = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?`,
+      ).bind(extracted.artistHandle, wallpaperId),
+      ...mediaStatements,
+      env.WALLPAPERBOT_DB.prepare(
+        "INSERT INTO wallpaper_events (wallpaper_id, event_type, details_json) VALUES (?, 'metadata_extracted', ?)",
+      ).bind(wallpaperId, JSON.stringify({ imageCount: extracted.images.length })),
+    ]);
+
+    await sendTelegramMessage(
+      env,
+      chatId,
+      `Found ${extracted.images.length} image(s) by ${extracted.artistHandle}. They are awaiting private-archive setup; no publication slot has been reserved.`,
+    );
+  } catch (error) {
+    const extractionError =
+      error instanceof FxEmbedError
+        ? error
+        : new FxEmbedError("An unexpected extraction error occurred.", true);
+    await recordExtractionFailure(wallpaperId, extractionError, env);
+    await sendTelegramMessage(env, chatId, `Could not process this X post: ${extractionError.message}`);
+  }
+}
+
+async function allocateFilenameNumber(artistHandle: string, env: BotEnv): Promise<number> {
+  const result = await env.WALLPAPERBOT_DB.prepare(
+    `INSERT INTO artist_counters (artist_handle, next_filename_number)
+     VALUES (?, 2)
+     ON CONFLICT(artist_handle) DO UPDATE SET
+       next_filename_number = artist_counters.next_filename_number + 1,
+       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     RETURNING next_filename_number - 1 AS filename_number`,
+  )
+    .bind(artistHandle)
+    .first<{ filename_number: number }>();
+
+  if (!result) {
+    throw new Error("Could not allocate a filename number.");
+  }
+  return result.filename_number;
+}
+
+function buildFilename(
+  artistHandle: string,
+  number: number,
+  position: number,
+  imageCount: number,
+  sourceUrl: string,
+): string {
+  const extension = new URL(sourceUrl).pathname.match(/\.(jpe?g|png|webp)$/i)?.[1]?.toLowerCase() ?? "jpg";
+  const base = `${artistHandle}_Twitter${String(number).padStart(3, "0")}`;
+  return imageCount === 1
+    ? `${base}.${extension}`
+    : `${base}_${String(position + 1).padStart(2, "0")}.${extension}`;
+}
+
+async function recordExtractionFailure(
+  wallpaperId: string,
+  error: FxEmbedError,
+  env: BotEnv,
+): Promise<void> {
+  const nextRetrySql = error.retryable
+    ? "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+30 minutes')"
+    : "NULL";
+  await env.WALLPAPERBOT_DB.batch([
+    env.WALLPAPERBOT_DB.prepare(
+      `UPDATE wallpapers
+       SET status = 'failed', last_error = ?, next_retry_at = ${nextRetrySql},
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+       WHERE id = ?`,
+    ).bind(error.message, wallpaperId),
+    env.WALLPAPERBOT_DB.prepare(
+      "INSERT INTO wallpaper_events (wallpaper_id, event_type, details_json) VALUES (?, 'extraction_failed', ?)",
+    ).bind(wallpaperId, JSON.stringify({ retryable: error.retryable, message: error.message })),
+  ]);
 }
 
 async function sendTelegramMessage(

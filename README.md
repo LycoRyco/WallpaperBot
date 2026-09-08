@@ -43,11 +43,13 @@ Link: https://x.com/artist_handle/status/POST_ID
 
 In Telegram, the artist-handle text links to that artist's X profile; it is not prefixed with `@`.
 
-Each wallpaper gets a stable filename when it is successfully downloaded, for example:
+Each wallpaper gets a stable filename when its X media is successfully extracted, for example:
 
 ```text
 artist_handle_Twitter001.jpg
 ```
+
+A multi-image post uses the same wallpaper number with an image-order suffix, for example `artist_handle_Twitter001_01.jpg` and `artist_handle_Twitter001_02.jpg`.
 
 Using **Publish now** may intentionally make these filename numbers appear out of channel-posting order. The filename will not be changed later.
 
