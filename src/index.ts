@@ -123,6 +123,7 @@ const TELEGRAM_SETUP_PATH = "/internal/register-webhook";
 const ARCHIVE_SETUP_MARKER = "#wallpaperbot-archive-setup";
 const PUBLIC_CHANNEL_SETUP_MARKER = "#wallpaperbot-public-setup";
 const CHANNEL_SETUP_LIFETIME_MS = 10 * 60 * 1000;
+const CHANNEL_HANDLE = "@LycoRyco_Wallpapers";
 
 export default {
   async fetch(request: Request, env: BotEnv, ctx: ExecutionContext): Promise<Response> {
@@ -955,7 +956,7 @@ function buildChannelCaption(artistHandle: string, sourceUrl: string): string {
     "Wallpaper Source: X (Twitter)",
     `Link: ${safeSource}`,
     "",
-    "@LycoRyco_Wallpapers",
+    CHANNEL_HANDLE,
   ].join("\n");
 }
 
@@ -1505,14 +1506,12 @@ async function publishWallpaper(
     }
 
     let documentIds = parseMessageIds(wallpaper.published_document_message_ids);
-    for (let index = documentIds.length; index < media.results.length; index += 1) {
-      const result = await telegramApi(env, "sendDocument", {
-        chat_id: publicChannelId,
-        document: media.results[index].archive_file_id,
-        disable_notification: true,
-      }) as { message_id?: number };
-      if (result.message_id === undefined) throw new Error("Telegram did not return a document message ID.");
-      documentIds.push(result.message_id);
+    if (documentIds.length === 0) {
+      documentIds = await sendPublicDocuments(
+        env,
+        publicChannelId,
+        media.results.map((item) => item.archive_file_id),
+      );
       await env.WALLPAPERBOT_DB.prepare(
         "UPDATE wallpapers SET published_document_message_ids = ? WHERE id = ?",
       ).bind(JSON.stringify(documentIds), wallpaperId).run();
@@ -1592,6 +1591,34 @@ async function sendPublicPhotos(
   const messages = Array.isArray(result) ? result : [result];
   const ids = messages.map((message) => (message as { message_id?: number }).message_id);
   if (ids.some((id) => id === undefined)) throw new Error("Telegram did not return photo message IDs.");
+  return ids as number[];
+}
+
+async function sendPublicDocuments(
+  env: BotEnv,
+  channelId: string,
+  fileIds: string[],
+): Promise<number[]> {
+  const method = fileIds.length === 1 ? "sendDocument" : "sendMediaGroup";
+  const result = await telegramApi(env, method, fileIds.length === 1
+    ? {
+      chat_id: channelId,
+      document: fileIds[0],
+      caption: CHANNEL_HANDLE,
+      disable_notification: true,
+    }
+    : {
+      chat_id: channelId,
+      disable_notification: true,
+      media: fileIds.map((fileId, index) => ({
+        type: "document",
+        media: fileId,
+        ...(index === 0 ? { caption: CHANNEL_HANDLE } : {}),
+      })),
+    });
+  const messages = Array.isArray(result) ? result : [result];
+  const ids = messages.map((message) => (message as { message_id?: number }).message_id);
+  if (ids.some((id) => id === undefined)) throw new Error("Telegram did not return document message IDs.");
   return ids as number[];
 }
 
