@@ -1517,21 +1517,6 @@ async function publishWallpaper(
       ).bind(JSON.stringify(documentIds), wallpaperId).run();
     }
 
-    // Keep the channel handle visually below the complete document album rather
-    // than attaching it to the first document in a multi-file Telegram group.
-    if (documentIds.length === media.results.length) {
-      const label = await telegramApi(env, "sendMessage", {
-        chat_id: publicChannelId,
-        text: CHANNEL_HANDLE,
-        disable_notification: true,
-      }) as { message_id?: number };
-      if (label.message_id === undefined) throw new Error("Telegram did not return the document-label message ID.");
-      documentIds.push(label.message_id);
-      await env.WALLPAPERBOT_DB.prepare(
-        "UPDATE wallpapers SET published_document_message_ids = ? WHERE id = ?",
-      ).bind(JSON.stringify(documentIds), wallpaperId).run();
-    }
-
     await env.WALLPAPERBOT_DB.batch([
       env.WALLPAPERBOT_DB.prepare(
         "UPDATE wallpapers SET status = 'published', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
@@ -1619,14 +1604,16 @@ async function sendPublicDocuments(
     ? {
       chat_id: channelId,
       document: fileIds[0],
+      caption: CHANNEL_HANDLE,
       disable_notification: true,
     }
     : {
       chat_id: channelId,
       disable_notification: true,
-      media: fileIds.map((fileId) => ({
+      media: fileIds.map((fileId, index) => ({
         type: "document",
         media: fileId,
+        ...(index === fileIds.length - 1 ? { caption: CHANNEL_HANDLE } : {}),
       })),
     });
   const messages = Array.isArray(result) ? result : [result];
