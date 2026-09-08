@@ -85,6 +85,7 @@ type ControlWallpaper = {
   archive_message_ids: string | null;
   published_photo_message_ids: string | null;
   published_document_message_ids: string | null;
+  retry_count: number;
 };
 
 type PublishMedia = {
@@ -94,6 +95,11 @@ type PublishMedia = {
 
 type TelegramInlineKeyboard = {
   inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
+};
+
+type ClearableWallpaper = {
+  id: string;
+  archive_message_ids: string | null;
 };
 
 type XPostLink = {
@@ -126,6 +132,9 @@ export default {
     }
 
     return new Response("Not found", { status: 404 });
+  },
+  async scheduled(_controller: ScheduledController, env: BotEnv, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(processDuePublications(env));
   },
 } satisfies ExportedHandler<BotEnv>;
 
@@ -253,6 +262,19 @@ async function handleOwnerMessage(
     return;
   }
 
+  if (text === "/clearqueue") {
+    await sendTelegramMessage(
+      env,
+      chatId,
+      "Clear every wallpaper that is currently queued? This permanently deletes their private archive files. Published history is kept.",
+      { inline_keyboard: [[
+        { text: "Yes, clear the whole queue", callback_data: "q:clear" },
+        { text: "Keep the queue", callback_data: "q:keep" },
+      ]] },
+    );
+    return;
+  }
+
   const xPost = parseXPostLink(text);
   if (xPost) {
     await sendTelegramMessage(env, chatId, await receiveXPost(xPost, env, chatId, ctx));
@@ -314,6 +336,16 @@ async function handleCallbackQuery(
     return;
   }
   if (!(await claimTelegramUpdate(update.update_id, env))) return;
+
+  if (data === "q:keep") {
+    await answerCallbackQuery(env, callbackId, "Queue kept.");
+    return;
+  }
+  if (data === "q:clear") {
+    await answerCallbackQuery(env, callbackId, "Clearing queued wallpapers…");
+    ctx.waitUntil(clearQueuedWallpapers(env));
+    return;
+  }
 
   const [action, wallpaperId, value] = data.split(":");
   if (!wallpaperId || !isWallpaperId(wallpaperId)) {
@@ -1210,7 +1242,67 @@ async function cancelWallpaper(wallpaperId: string, env: BotEnv): Promise<void> 
   await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "Wallpaper canceled and its private archive files were deleted.");
 }
 
-async function publishWallpaper(wallpaperId: string, env: BotEnv): Promise<void> {
+async function clearQueuedWallpapers(env: BotEnv): Promise<void> {
+  try {
+    const archiveChannelId = await getBotSetting("archive_channel_id", env);
+    const queued = await env.WALLPAPERBOT_DB.prepare(
+      `SELECT id, archive_message_ids FROM wallpapers
+       WHERE status IN ('extracting', 'scheduled', 'publishing', 'failed')`,
+    ).all<ClearableWallpaper>();
+
+    if (queued.results.length === 0) {
+      await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "Your queue is already empty.");
+      return;
+    }
+
+    if (archiveChannelId) {
+      for (const wallpaper of queued.results) {
+        for (const messageId of parseMessageIds(wallpaper.archive_message_ids)) {
+          await telegramApi(env, "deleteMessage", { chat_id: archiveChannelId, message_id: messageId });
+        }
+      }
+    }
+
+    for (const wallpaper of queued.results) {
+      await env.WALLPAPERBOT_DB.batch([
+        env.WALLPAPERBOT_DB.prepare("DELETE FROM wallpaper_events WHERE wallpaper_id = ?").bind(wallpaper.id),
+        env.WALLPAPERBOT_DB.prepare("DELETE FROM media WHERE wallpaper_id = ?").bind(wallpaper.id),
+        env.WALLPAPERBOT_DB.prepare("DELETE FROM wallpapers WHERE id = ?").bind(wallpaper.id),
+      ]);
+    }
+    await sendTelegramMessage(
+      env,
+      env.OWNER_TELEGRAM_USER_ID,
+      `Cleared ${queued.results.length} queued wallpaper(s) and their private archive files.`,
+    );
+  } catch (error) {
+    console.error("Queue clearing failed", error);
+    await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "The queue could not be fully cleared. Nothing else was deleted automatically.");
+  }
+}
+
+async function processDuePublications(env: BotEnv): Promise<void> {
+  const now = new Date().toISOString();
+  const due = await env.WALLPAPERBOT_DB.prepare(
+    `SELECT id FROM wallpapers
+     WHERE status = 'scheduled' AND scheduled_for IS NOT NULL AND scheduled_for <= ?
+       AND (next_retry_at IS NULL OR next_retry_at <= ?)
+     ORDER BY scheduled_for
+     LIMIT 5`,
+  )
+    .bind(now, now)
+    .all<WallpaperId>();
+
+  for (const wallpaper of due.results) {
+    await publishWallpaper(wallpaper.id, env, true);
+  }
+}
+
+async function publishWallpaper(
+  wallpaperId: string,
+  env: BotEnv,
+  automatic = false,
+): Promise<void> {
   const publicChannelId = await getBotSetting("public_channel_id", env);
   if (!publicChannelId) {
     await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "No public wallpaper channel is connected yet.");
@@ -1228,6 +1320,7 @@ async function publishWallpaper(wallpaperId: string, env: BotEnv): Promise<void>
     return;
   }
 
+  let attemptNumber = 1;
   try {
     const wallpaper = await getControlWallpaper(wallpaperId, env);
     const media = await env.WALLPAPERBOT_DB.prepare(
@@ -1238,6 +1331,7 @@ async function publishWallpaper(wallpaperId: string, env: BotEnv): Promise<void>
     if (!wallpaper?.artist_handle || media.results.length === 0 || media.results.some((item) => !item.archive_file_id)) {
       throw new Error("The archived media for this wallpaper is incomplete.");
     }
+    attemptNumber = wallpaper.retry_count + 1;
 
     let photoIds = parseMessageIds(wallpaper.published_photo_message_ids);
     if (photoIds.length === 0) {
@@ -1269,21 +1363,41 @@ async function publishWallpaper(wallpaperId: string, env: BotEnv): Promise<void>
         "INSERT INTO wallpaper_events (wallpaper_id, event_type) VALUES (?, 'published')",
       ).bind(wallpaperId),
     ]);
-    await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "Wallpaper published successfully to the connected test channel.");
+    await sendTelegramMessage(
+      env,
+      env.OWNER_TELEGRAM_USER_ID,
+      automatic
+        ? "Scheduled wallpaper published successfully to the connected channel."
+        : "Wallpaper published successfully to the connected test channel.",
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : "An unexpected publication error occurred.";
+    const retryAt = attemptNumber < 3;
     await env.WALLPAPERBOT_DB.prepare(
-      `UPDATE wallpapers SET status = 'scheduled', last_error = ?,
+      `UPDATE wallpapers
+       SET status = ?, retry_count = ?, next_retry_at = ?, last_error = ?,
        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`,
-    ).bind(message, wallpaperId).run();
-    await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, `Could not publish this wallpaper: ${message}`);
+    ).bind(
+      retryAt ? "scheduled" : "failed",
+      attemptNumber,
+      retryAt ? new Date(Date.now() + 30 * 60 * 1000).toISOString() : null,
+      message,
+      wallpaperId,
+    ).run();
+    await sendTelegramMessage(
+      env,
+      env.OWNER_TELEGRAM_USER_ID,
+      retryAt
+        ? `Could not publish this wallpaper. I will retry in 30 minutes (attempt ${attemptNumber} of 3): ${message}`
+        : `Could not publish this wallpaper after 3 attempts: ${message}`,
+    );
   }
 }
 
 async function getControlWallpaper(wallpaperId: string, env: BotEnv): Promise<ControlWallpaper | null> {
   return env.WALLPAPERBOT_DB.prepare(
     `SELECT id, artist_handle, source_url, status, scheduled_for, archive_message_ids,
-            published_photo_message_ids, published_document_message_ids
+            published_photo_message_ids, published_document_message_ids, retry_count
      FROM wallpapers WHERE id = ?`,
   )
     .bind(wallpaperId)

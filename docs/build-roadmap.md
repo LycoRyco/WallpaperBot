@@ -136,6 +136,12 @@ We will add:
 
 Test: temporarily use a near-future test slot and confirm the public channel receives the visual album followed by the documents.
 
+Implementation notes:
+
+- Cloudflare invokes the Worker every five minutes; the Worker checks due slots in Tehran time rather than relying on a fixed Tehran-to-UTC offset.
+- A delayed run still publishes an overdue wallpaper instead of missing it.
+- A publication failure retries after 30 minutes, up to three total attempts, then alerts the owner.
+
 ## Stage 8 — Final hardening
 
 **Purpose:** Make personal daily use dependable.

@@ -4,6 +4,9 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-08",
   "workers_dev": true,
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
   "vars": {
     "FXEMBED_API_BASE_URL": "https://api.fxtwitter.com"
   },
