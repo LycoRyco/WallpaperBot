@@ -662,10 +662,12 @@ async function sendScheduledPreview(wallpaperId: string, env: BotEnv): Promise<v
     .all<PreviewMedia>();
   const caption = buildChannelCaption(wallpaper.artist_handle, wallpaper.source_url);
 
+  let visualSent = false;
   try {
     await sendPreviewImages(env, media.results.map((item) => item.preview_url), caption);
+    visualSent = true;
   } catch (error) {
-    console.warn("Visual preview could not be sent", error);
+    console.error("Visual preview could not be sent", error);
   }
 
   const text = [
@@ -676,7 +678,7 @@ async function sendScheduledPreview(wallpaperId: string, env: BotEnv): Promise<v
     "The visual preview and exact channel caption are shown above.",
   ].join("\n");
   const sent = await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, text);
-  if (sent) {
+  if (sent && visualSent) {
     await env.WALLPAPERBOT_DB.prepare(
       "INSERT INTO wallpaper_events (wallpaper_id, event_type) VALUES (?, 'preview_sent')",
     )
@@ -723,7 +725,10 @@ async function sendPreviewImages(env: BotEnv, urls: string[], caption: string): 
   const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${endpoint}`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
   });
-  if (!response.ok) throw new Error(`Telegram ${endpoint} failed`);
+  const payload = (await response.json()) as { ok?: boolean; description?: string };
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.description || `Telegram ${endpoint} failed`);
+  }
 }
 
 function futureTehranSlots(now: Date): Date[] {
