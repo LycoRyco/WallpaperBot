@@ -34,12 +34,14 @@ The application logic will be kept separate from Cloudflare-specific code, so it
 The source link remains visible, as requested:
 
 ```text
-Artist: @artist_handle
+Artist: artist_handle
 Wallpaper Source: X (Twitter)
 Link: https://x.com/artist_handle/status/POST_ID
 
 @LycoRyco_Wallpapers
 ```
+
+In Telegram, the artist-handle text links to that artist's X profile; it is not prefixed with `@`.
 
 Each wallpaper gets a stable filename when it is successfully downloaded, for example:
 
