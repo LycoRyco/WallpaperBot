@@ -39,6 +39,12 @@ Private archive-channel connection:
 2. Post exactly `#wallpaperbot-archive-setup` as a new message in the private archive channel.
 3. The bot reads the channel ID automatically and confirms in your private bot chat.
 
+Public wallpaper-channel connection:
+
+1. Add the bot as an administrator in the public wallpaper channel, with permission to post messages and media.
+2. Post exactly `#wallpaperbot-public-setup` as a new channel message.
+3. The bot confirms in your private bot chat. The setup marker is an ordinary channel message; it does **not** trigger a wallpaper publication.
+
 No token will ever be pasted into source code or committed to Git.
 
 Completed:

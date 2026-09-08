@@ -79,6 +79,7 @@ type XPostLink = {
 const TELEGRAM_WEBHOOK_PATH = "/telegram/webhook";
 const TELEGRAM_SETUP_PATH = "/internal/register-webhook";
 const ARCHIVE_SETUP_MARKER = "#wallpaperbot-archive-setup";
+const PUBLIC_CHANNEL_SETUP_MARKER = "#wallpaperbot-public-setup";
 
 export default {
   async fetch(request: Request, env: BotEnv, ctx: ExecutionContext): Promise<Response> {
@@ -238,7 +239,8 @@ async function handleOwnerMessage(
 async function handleChannelSetup(update: TelegramUpdate, env: BotEnv): Promise<void> {
   const channelPost = update.channel_post;
   const channelId = channelPost?.chat?.id;
-  if (channelId === undefined || channelPost?.text?.trim() !== ARCHIVE_SETUP_MARKER) {
+  const marker = channelPost?.text?.trim();
+  if (channelId === undefined) {
     return;
   }
 
@@ -246,12 +248,24 @@ async function handleChannelSetup(update: TelegramUpdate, env: BotEnv): Promise<
     return;
   }
 
-  await setBotSetting("archive_channel_id", String(channelId), env);
-  await sendTelegramMessage(
-    env,
-    env.OWNER_TELEGRAM_USER_ID,
-    "Private archive channel connected successfully.",
-  );
+  if (marker === ARCHIVE_SETUP_MARKER) {
+    await setBotSetting("archive_channel_id", String(channelId), env);
+    await sendTelegramMessage(
+      env,
+      env.OWNER_TELEGRAM_USER_ID,
+      "Private archive channel connected successfully.",
+    );
+    return;
+  }
+
+  if (marker === PUBLIC_CHANNEL_SETUP_MARKER) {
+    await setBotSetting("public_channel_id", String(channelId), env);
+    await sendTelegramMessage(
+      env,
+      env.OWNER_TELEGRAM_USER_ID,
+      "Public wallpaper channel connected successfully. Nothing has been published.",
+    );
+  }
 }
 
 async function claimTelegramUpdate(updateId: number, env: BotEnv): Promise<boolean> {
