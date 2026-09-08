@@ -33,6 +33,12 @@ You will be guided through:
 5. Creating a D1 database and Worker project.
 6. Saving private values as Cloudflare secrets rather than GitHub files.
 
+Private archive-channel connection:
+
+1. Add the bot as a channel administrator with permission to post messages.
+2. Post exactly `#wallpaperbot-archive-setup` as a new message in the private archive channel.
+3. The bot reads the channel ID automatically and confirms in your private bot chat.
+
 No token will ever be pasted into source code or committed to Git.
 
 Completed:

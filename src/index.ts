@@ -18,6 +18,13 @@ type TelegramUpdate = {
     };
     text?: string;
   };
+  channel_post?: {
+    chat?: {
+      id: number;
+      type?: string;
+    };
+    text?: string;
+  };
 };
 
 type QueuedWallpaper = {
@@ -40,6 +47,7 @@ type XPostLink = {
 
 const TELEGRAM_WEBHOOK_PATH = "/telegram/webhook";
 const TELEGRAM_SETUP_PATH = "/internal/register-webhook";
+const ARCHIVE_SETUP_MARKER = "#wallpaperbot-archive-setup";
 
 export default {
   async fetch(request: Request, env: BotEnv, ctx: ExecutionContext): Promise<Response> {
@@ -88,6 +96,11 @@ async function handleTelegramWebhook(
     return new Response("Invalid Telegram update", { status: 400 });
   }
 
+  if (update.channel_post) {
+    await handleChannelSetup(update, env);
+    return new Response("OK");
+  }
+
   await handleOwnerMessage(update, env, ctx);
   return new Response("OK");
 }
@@ -109,7 +122,7 @@ async function registerTelegramWebhook(
       body: JSON.stringify({
         url: webhookUrl,
         secret_token: env.TELEGRAM_WEBHOOK_SECRET,
-        allowed_updates: ["message", "callback_query"],
+        allowed_updates: ["message", "channel_post", "callback_query"],
       }),
     },
   );
@@ -191,6 +204,25 @@ async function handleOwnerMessage(
   );
 }
 
+async function handleChannelSetup(update: TelegramUpdate, env: BotEnv): Promise<void> {
+  const channelPost = update.channel_post;
+  const channelId = channelPost?.chat?.id;
+  if (channelId === undefined || channelPost?.text?.trim() !== ARCHIVE_SETUP_MARKER) {
+    return;
+  }
+
+  if (!(await claimTelegramUpdate(update.update_id, env))) {
+    return;
+  }
+
+  await setBotSetting("archive_channel_id", String(channelId), env);
+  await sendTelegramMessage(
+    env,
+    env.OWNER_TELEGRAM_USER_ID,
+    "Private archive channel connected successfully.",
+  );
+}
+
 async function claimTelegramUpdate(updateId: number, env: BotEnv): Promise<boolean> {
   const result = await env.WALLPAPERBOT_DB.prepare(
     "INSERT OR IGNORE INTO processed_telegram_updates (update_id) VALUES (?)",
@@ -199,6 +231,22 @@ async function claimTelegramUpdate(updateId: number, env: BotEnv): Promise<boole
     .run();
 
   return result.meta.changes === 1;
+}
+
+async function setBotSetting(
+  key: string,
+  value: string,
+  env: BotEnv,
+): Promise<void> {
+  await env.WALLPAPERBOT_DB.prepare(
+    `INSERT INTO bot_settings (setting_key, setting_value)
+     VALUES (?, ?)
+     ON CONFLICT(setting_key) DO UPDATE SET
+       setting_value = excluded.setting_value,
+       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+  )
+    .bind(key, value)
+    .run();
 }
 
 async function buildQueueMessage(env: BotEnv): Promise<string> {
@@ -437,7 +485,7 @@ async function recordExtractionFailure(
 
 async function sendTelegramMessage(
   env: BotEnv,
-  chatId: number,
+  chatId: number | string,
   text: string,
 ): Promise<void> {
   const response = await fetch(
