@@ -40,6 +40,18 @@ type ExistingWallpaper = {
   scheduled_for: string | null;
 };
 
+type ArchiveMedia = {
+  id: string;
+  source_position: number;
+  original_url: string;
+  filename: string;
+  archive_file_id: string | null;
+};
+
+type ArchiveWallpaper = {
+  archive_message_ids: string | null;
+};
+
 type XPostLink = {
   postId: string;
   canonicalUrl: string;
@@ -342,8 +354,12 @@ async function receiveXPost(
           "INSERT INTO wallpaper_events (wallpaper_id, event_type) VALUES (?, 'retry_requested')",
         ).bind(existing.id),
       ]);
-      ctx.waitUntil(extractAndStoreMetadata(existing.id, xPost.postId, chatId, env));
+      ctx.waitUntil(recoverExistingExtraction(existing.id, xPost.postId, chatId, env));
       return "That post previously failed. Its extraction retry cycle has been restarted.";
+    }
+
+    if (existing.status === "extracting") {
+      ctx.waitUntil(recoverExistingExtraction(existing.id, xPost.postId, chatId, env));
     }
 
     const schedule = existing.scheduled_for
@@ -415,10 +431,11 @@ async function extractAndStoreMetadata(
       ).bind(wallpaperId, JSON.stringify({ imageCount: extracted.images.length })),
     ]);
 
+    await archiveExtractedWallpaper(wallpaperId, chatId, env);
     await sendTelegramMessage(
       env,
       chatId,
-      `Found ${extracted.images.length} image(s) by ${extracted.artistHandle}. They are awaiting private-archive setup; no publication slot has been reserved.`,
+      `Archived ${extracted.images.length} original image(s) by ${extracted.artistHandle}. No publication slot has been reserved yet.`,
     );
   } catch (error) {
     const extractionError =
@@ -428,6 +445,215 @@ async function extractAndStoreMetadata(
     await recordExtractionFailure(wallpaperId, extractionError, env);
     await sendTelegramMessage(env, chatId, `Could not process this X post: ${extractionError.message}`);
   }
+}
+
+async function recoverExistingExtraction(
+  wallpaperId: string,
+  postId: string,
+  chatId: number,
+  env: BotEnv,
+): Promise<void> {
+  const mediaCount = await env.WALLPAPERBOT_DB.prepare(
+    "SELECT COUNT(*) AS count FROM media WHERE wallpaper_id = ?",
+  )
+    .bind(wallpaperId)
+    .first<{ count: number }>();
+
+  if ((mediaCount?.count ?? 0) === 0) {
+    await extractAndStoreMetadata(wallpaperId, postId, chatId, env);
+    return;
+  }
+
+  try {
+    await archiveExtractedWallpaper(wallpaperId, chatId, env);
+    await sendTelegramMessage(env, chatId, "The missing archive uploads have been recovered.");
+  } catch (error) {
+    const archiveError = toArchiveError(error);
+    await recordExtractionFailure(wallpaperId, archiveError, env);
+    await sendTelegramMessage(env, chatId, `Could not archive this X post: ${archiveError.message}`);
+  }
+}
+
+async function archiveExtractedWallpaper(
+  wallpaperId: string,
+  chatId: number,
+  env: BotEnv,
+): Promise<void> {
+  const archiveChannelId = await getBotSetting("archive_channel_id", env);
+  if (!archiveChannelId) {
+    throw new FxEmbedError("The private archive channel has not been connected.", false);
+  }
+
+  const [mediaResult, wallpaper] = await Promise.all([
+    env.WALLPAPERBOT_DB.prepare(
+      `SELECT id, source_position, original_url, filename, archive_file_id
+       FROM media WHERE wallpaper_id = ? ORDER BY source_position`,
+    )
+      .bind(wallpaperId)
+      .all<ArchiveMedia>(),
+    env.WALLPAPERBOT_DB.prepare(
+      "SELECT archive_message_ids FROM wallpapers WHERE id = ?",
+    )
+      .bind(wallpaperId)
+      .first<ArchiveWallpaper>(),
+  ]);
+
+  const messageIds = parseMessageIds(wallpaper?.archive_message_ids);
+  for (const media of mediaResult.results) {
+    if (media.archive_file_id) {
+      continue;
+    }
+
+    const archived = await uploadOriginalToTelegramArchive(
+      env,
+      archiveChannelId,
+      media.original_url,
+      media.filename,
+    );
+    messageIds.push(archived.messageId);
+    await env.WALLPAPERBOT_DB.batch([
+      env.WALLPAPERBOT_DB.prepare(
+        "UPDATE media SET archive_file_id = ? WHERE id = ?",
+      ).bind(archived.fileId, media.id),
+      env.WALLPAPERBOT_DB.prepare(
+        `UPDATE wallpapers
+         SET archive_message_ids = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?`,
+      ).bind(JSON.stringify(messageIds), wallpaperId),
+    ]);
+  }
+
+  await env.WALLPAPERBOT_DB.prepare(
+    "INSERT INTO wallpaper_events (wallpaper_id, event_type) VALUES (?, 'archived')",
+  )
+    .bind(wallpaperId)
+    .run();
+}
+
+async function getBotSetting(key: string, env: BotEnv): Promise<string | null> {
+  const setting = await env.WALLPAPERBOT_DB.prepare(
+    "SELECT setting_value FROM bot_settings WHERE setting_key = ?",
+  )
+    .bind(key)
+    .first<{ setting_value: string }>();
+  return setting?.setting_value ?? null;
+}
+
+function parseMessageIds(value: string | null | undefined): number[] {
+  if (!value) {
+    return [];
+  }
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) && parsed.every((item) => typeof item === "number")
+      ? parsed
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+async function uploadOriginalToTelegramArchive(
+  env: BotEnv,
+  archiveChannelId: string,
+  sourceUrl: string,
+  filename: string,
+): Promise<{ fileId: string; messageId: number }> {
+  const source = await fetch(sourceUrl, {
+    headers: { "user-agent": "WallpaperBot/0.1 (personal Telegram bot)" },
+  });
+  if (!source.ok || !source.body) {
+    throw new FxEmbedError("The original image could not be downloaded from X.", true);
+  }
+
+  const contentLength = Number(source.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > 50 * 1024 * 1024) {
+    throw new FxEmbedError("The original image is larger than Telegram's 50 MB bot limit.", false);
+  }
+
+  const boundary = `WallpaperBot${crypto.randomUUID().replaceAll("-", "")}`;
+  const contentType = source.headers.get("content-type")?.split(";")[0] || "application/octet-stream";
+  const body = createMultipartStream(
+    boundary,
+    archiveChannelId,
+    source.body,
+    filename,
+    contentType,
+  );
+  const response = await fetch(
+    `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendDocument`,
+    {
+      method: "POST",
+      headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
+      body,
+    },
+  );
+  const payload = (await response.json()) as {
+    ok?: boolean;
+    result?: { message_id?: number; document?: { file_id?: string } };
+    description?: string;
+  };
+  const fileId = payload.result?.document?.file_id;
+  const messageId = payload.result?.message_id;
+  if (!response.ok || !payload.ok || !fileId || messageId === undefined) {
+    throw new FxEmbedError(
+      payload.description || "Telegram could not archive the original image.",
+      response.status >= 500 || response.status === 429,
+    );
+  }
+  return { fileId, messageId };
+}
+
+function createMultipartStream(
+  boundary: string,
+  chatId: string,
+  source: ReadableStream<Uint8Array>,
+  filename: string,
+  contentType: string,
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const safeFilename = filename.replaceAll('"', "_");
+  const prefix = encoder.encode(
+    `--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}\r\n` +
+      `--${boundary}\r\nContent-Disposition: form-data; name="disable_notification"\r\n\r\ntrue\r\n` +
+      `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${safeFilename}"\r\n` +
+      `Content-Type: ${contentType}\r\n\r\n`,
+  );
+  const suffix = encoder.encode(`\r\n--${boundary}--\r\n`);
+  const reader = source.getReader();
+  let phase = 0;
+
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (phase === 0) {
+        phase = 1;
+        controller.enqueue(prefix);
+        return;
+      }
+      if (phase === 1) {
+        const next = await reader.read();
+        if (!next.done) {
+          controller.enqueue(next.value);
+          return;
+        }
+        phase = 2;
+      }
+      if (phase === 2) {
+        phase = 3;
+        controller.enqueue(suffix);
+        controller.close();
+      }
+    },
+    async cancel() {
+      await reader.cancel();
+    },
+  });
+}
+
+function toArchiveError(error: unknown): FxEmbedError {
+  return error instanceof FxEmbedError
+    ? error
+    : new FxEmbedError("An unexpected archive error occurred.", true);
 }
 
 async function allocateFilenameNumber(artistHandle: string, env: BotEnv): Promise<number> {
