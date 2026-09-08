@@ -1,6 +1,6 @@
 # WallpaperBot architecture
 
-This document is the agreed technical blueprint for version 1 of WallpaperBot. It is written so that each later coding step has a clear purpose.
+This document describes the implemented version 1 architecture of WallpaperBot.
 
 ## Goal
 
@@ -57,6 +57,8 @@ Duplicate behavior:
 - **Queued, ready, scheduled, or published:** the bot returns its existing status instead of downloading it again.
 - **Failed:** sending the link again starts a fresh retry cycle for that same post.
 
+The owner can deliberately forget one of the last three published-history records with `/clearpublished` when a repost is wanted.
+
 ### 2. Extract and archive
 
 1. The Worker asks FxEmbed for the post's author handle and media list.
@@ -88,7 +90,7 @@ At the selected time, the Worker:
 
 1. Obtains the queued item and marks it as being published so it cannot run twice.
 2. Sends the visual image album to the public channel, with the channel caption on the first image.
-3. Sends the matching original files immediately afterward as Telegram documents.
+3. Sends the matching original files immediately afterward as Telegram documents. A multi-image document album places the channel handle on its final document.
 4. Records the resulting Telegram message IDs and marks the item published.
 5. Notifies you if publication cannot complete.
 
@@ -121,16 +123,16 @@ The Worker will not re-compress or alter original files. This avoids quality los
 ### Extraction failures
 
 - Initial extraction happens immediately.
-- The bot tries again after 30 minutes.
-- It makes up to three automatic retry attempts.
-- After the final failure, it notifies you with a **Retry** button.
+- The bot tries again after 10 minutes.
+- It makes up to three total attempts.
+- After the final failure, it sends a clear private notification.
 - No slot is held during an extraction failure.
 
 When a delayed retry succeeds, the item takes the next available future slot. It never displaces a previously ready or scheduled wallpaper.
 
 ### Publication failures
 
-The bot records each publication attempt to prevent accidental duplicate posts. If Telegram reports an error, the bot notifies you with the affected item and a safe retry option.
+The bot records publication progress to prevent accidental duplicate posts. If Telegram reports an error, it retries after 10 minutes, up to three total attempts, then notifies the owner.
 
 ## Schedule implementation
 
@@ -155,7 +157,7 @@ The final database schema will contain at least:
 - The bot token is stored only as a Cloudflare secret.
 - Telegram webhook requests carry a second Cloudflare secret header, so forged requests are rejected.
 - The owner Telegram user ID is stored as configuration and checked on every update.
-- Channel IDs are stored as configuration, not hard-coded in source code.
+- Channel IDs are learned through a one-time, 10-minute pairing code and stored in D1, not hard-coded in source code.
 - `.env` files are ignored by Git.
 - The public repository contains placeholders only, never credentials, personal chat IDs, or bot tokens.
 

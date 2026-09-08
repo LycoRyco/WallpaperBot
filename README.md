@@ -1,37 +1,33 @@
 # WallpaperBot
 
-A personal Telegram bot for turning an X (Twitter) post link into a scheduled wallpaper post.
+Personal Telegram bot for turning a public X (Twitter) image post into a scheduled wallpaper post.
 
-WallpaperBot downloads the images from a supported X post, keeps them in their original order, sends you a private preview, and publishes them to your Telegram channel at the next available Tehran-time slot.
+WallpaperBot is built for one owner. Send it an X post link; it archives the original images, assigns the next available Tehran-time slot, sends a private preview, and publishes the finished post automatically.
 
-> **Project status:** The secure queue, X image extraction, private archive, previews, controls, retries, and automatic Tehran-time publication are working. The bot is currently connected to a test channel.
+## What it does
 
-## What the bot will do
+- Accepts public `x.com` and `twitter.com` image-post links from the configured owner only.
+- Preserves the original image order.
+- Archives original image files privately before a slot is reserved.
+- Schedules wallpapers at 09:00, 10:00, or 11:00 in `Asia/Tehran`.
+- Sends a private visual preview with **Publish now**, **Reschedule**, and **Cancel** controls.
+- Publishes a visual photo album first, then the original downloadable document album.
+- Keeps the visible X source link and artist handle in the public caption.
+- Adds `@LycoRyco_Wallpapers` to the final document in a multi-image file album.
+- Retries temporary extraction, archive, and publication failures every 10 minutes, up to three total attempts.
+- Prevents accidental duplicate posts, with an owner command to intentionally allow reuse of one of the last three published links.
 
-- Accept X post links from its owner only.
-- Extract image-only X posts through a configurable extractor service.
-- Keep the image order shown in the original X post.
-- Create a Telegram photo album with the channel caption, followed by downloadable document files.
-- Keep the original X source link visible in the caption.
-- Use the artist's X handle in the caption and filename.
-- Queue ready posts for 09:00, 10:00, or 11:00 in Tehran time.
-- Send a private preview with **Cancel**, **Reschedule**, and **Publish now** controls.
-- Retry failed extraction every 30 minutes, up to three times, then notify the owner.
-- Store queued source files in a private Telegram archive channel.
+## Daily use
 
-## Planned technology
+1. Send a public X image-post link to the bot.
+2. Wait for the private preview and its assigned Tehran-time slot.
+3. Leave it alone for automatic publication, or use the preview buttons to publish immediately, choose another slot, or cancel it.
 
-- **Hosting:** Cloudflare Workers (free plan)
-- **Database:** Cloudflare D1
-- **Scheduling:** Cloudflare Cron Trigger, with Tehran time calculated by the bot
-- **Bot platform:** Telegram Bot API
-- **X extraction:** FxEmbed public API initially; the extractor is designed to be replaceable later
+Send `/start` in the bot chat to show the persistent keyboard and owner command menu.
 
-The application logic will be kept separate from Cloudflare-specific code, so it can later be packaged in Docker and moved to a VPS without rewriting the bot.
+For the full command list and operational notes, see [the daily-use guide](docs/operations.md).
 
-## Expected post format
-
-The source link remains visible, as requested:
+## Public post format
 
 ```text
 Artist: artist_handle
@@ -41,43 +37,39 @@ Link: https://x.com/artist_handle/status/POST_ID
 @LycoRyco_Wallpapers
 ```
 
-In Telegram, the artist-handle text links to that artist's X profile; it is not prefixed with `@`.
+The artist handle links to the artist’s X profile while remaining readable as plain text. The source URL is intentionally visible.
 
-Each wallpaper gets a stable filename when its X media is successfully extracted, for example:
+## Technology
+
+- Cloudflare Workers and D1
+- Cloudflare Cron Trigger, checked every five minutes
+- Telegram Bot API
+- FxEmbed public API for X-post extraction
+
+The project keeps its Telegram and X-extraction logic separate enough to make a future Docker/VPS migration practical.
+
+## Limits
+
+- Image-only X posts are supported. Videos, GIFs, mixed-media posts, private posts, and deleted posts are rejected.
+- Original files larger than Telegram’s 50 MB normal bot-upload limit cannot be published by this version.
+- The FxEmbed public service is an external dependency; temporary problems are retried automatically.
+
+## Repository guide
 
 ```text
-artist_handle_Twitter001.jpg
+src/                 Worker and bot logic
+migrations/          Versioned D1 schema
+docs/architecture.md System design and data flow
+docs/operations.md   Daily use, commands, and channel setup
+docs/build-roadmap.md Historical implementation record
 ```
 
-A multi-image post uses the same wallpaper number with an image-order suffix, for example `artist_handle_Twitter001_01.jpg` and `artist_handle_Twitter001_02.jpg`.
+## Development
 
-Using **Publish now** may intentionally make these filename numbers appear out of channel-posting order. The filename will not be changed later.
-
-## Telegram file limits
-
-- The original image is preserved as a Telegram document when it is no more than 50 MB.
-- If an original is too large for Telegram's visual photo preview, the bot uses an X-provided smaller rendition for the preview while keeping the original document unchanged.
-- Files above Telegram's normal 50 MB bot-upload limit cannot be published by this first version.
-
-## Repository layout
-
-```text
-WallpaperBot/
-├── README.md              # Project overview and decisions
-├── .env.example           # Safe list of required configuration names
-├── .gitignore             # Keeps secrets and generated files out of Git
-├── docs/                  # Architecture and setup guides
-└── src/                   # Bot source code
+```bash
+npm run typecheck
+npm run dev
+npm run deploy
 ```
 
-## Before code is deployed
-
-You will need to:
-
-1. Create a Telegram bot with BotFather.
-2. Create a private Telegram archive channel and make the bot an admin there.
-3. Make the bot an admin in the public wallpaper channel.
-4. Create a free Cloudflare account and configure Workers and D1.
-5. Add the bot token and channel IDs as Cloudflare secrets, never to this repository.
-
-Detailed beginner-friendly setup instructions will be added as the project is built.
+Never commit real secrets. `.env.example` lists only the required secret names.

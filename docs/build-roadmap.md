@@ -1,4 +1,6 @@
-# Beginner-friendly build roadmap
+# Build roadmap and implementation record
+
+> Historical record: all core stages below are complete. For everyday use, see [operations.md](operations.md).
 
 This is the order we will follow. Each stage ends with a small test before moving to the next one.
 
