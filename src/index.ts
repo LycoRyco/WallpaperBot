@@ -529,12 +529,22 @@ async function receiveXPost(
 
     if (existing.status === "extracting") {
       ctx.waitUntil(recoverExistingExtraction(existing.id, xPost.postId, chatId, env));
+      return "That X post is already being processed. I’ll continue recovering it if needed.";
     }
 
-    const schedule = existing.scheduled_for
-      ? ` It is scheduled for ${formatTehranTime(existing.scheduled_for)}.`
-      : " It is already being processed.";
-    return `That X post is already known to the bot.${schedule}`;
+    if (existing.status === "published") {
+      return "That X post was already published to the connected channel. I will not publish a duplicate.";
+    }
+
+    if (existing.status === "publishing") {
+      return "That X post is already being published. I will not start another copy.";
+    }
+
+    if (existing.status === "scheduled" && existing.scheduled_for) {
+      return `That X post is already queued for ${formatTehranTime(existing.scheduled_for)}.`;
+    }
+
+    return "That X post is already known to the bot.";
   }
 
   const wallpaperId = crypto.randomUUID();
