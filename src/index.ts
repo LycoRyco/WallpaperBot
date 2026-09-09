@@ -41,6 +41,15 @@ type QueuedWallpaper = {
   scheduled_for: string | null;
 };
 
+type QueueCount = {
+  count: number;
+};
+
+type QueueView = {
+  text: string;
+  replyMarkup?: TelegramInlineKeyboard;
+};
+
 type ExistingWallpaper = {
   id: string;
   status: string;
@@ -144,6 +153,7 @@ const QUEUE_BUTTON = "📋 Queue";
 const HELP_BUTTON = "ℹ️ Help";
 const CLEAR_QUEUE_BUTTON = "🗑 Clear queue";
 const CONNECT_CHANNEL_BUTTON = "🔗 Connect channel";
+const QUEUE_PAGE_SIZE = 10;
 
 export default {
   async fetch(request: Request, env: BotEnv, ctx: ExecutionContext): Promise<Response> {
@@ -297,7 +307,8 @@ async function handleOwnerMessage(
   }
 
   if (text === "/queue" || text === QUEUE_BUTTON) {
-    await sendTelegramMessage(env, chatId, await buildQueueMessage(env));
+    const view = await buildQueueView(env, 0);
+    await sendTelegramMessage(env, chatId, view.text, view.replyMarkup);
     return;
   }
 
@@ -485,6 +496,17 @@ async function handleCallbackQuery(
     ctx.waitUntil(clearQueuedWallpapers(env));
     return;
   }
+  if (data.startsWith("qp:")) {
+    const page = Number(data.slice(3));
+    if (!Number.isInteger(page) || page < 0) {
+      await answerCallbackQuery(env, callbackId, "This queue page is no longer valid.");
+      return;
+    }
+    await answerCallbackQuery(env, callbackId);
+    const view = await buildQueueView(env, page);
+    await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, view.text, view.replyMarkup);
+    return;
+  }
 
   const [action, wallpaperId, value] = data.split(":");
   if (!wallpaperId || !isWallpaperId(wallpaperId)) {
@@ -597,20 +619,30 @@ async function deleteBotSetting(key: string, env: BotEnv): Promise<void> {
     .run();
 }
 
-async function buildQueueMessage(env: BotEnv): Promise<string> {
+async function buildQueueView(env: BotEnv, requestedPage: number): Promise<QueueView> {
   await assignSlotsForArchivedWallpapers(env);
   await sendMissingPreviews(env);
+  const countResult = await env.WALLPAPERBOT_DB.prepare(
+    `SELECT COUNT(*) AS count FROM wallpapers
+     WHERE status IN ('extracting', 'scheduled', 'publishing', 'failed')`,
+  ).first<QueueCount>();
+  const total = countResult?.count ?? 0;
+  if (total === 0) {
+    return { text: "Your wallpaper queue is empty." };
+  }
+
+  const pageCount = Math.ceil(total / QUEUE_PAGE_SIZE);
+  const page = Math.min(requestedPage, pageCount - 1);
+  const offset = page * QUEUE_PAGE_SIZE;
   const result = await env.WALLPAPERBOT_DB.prepare(
     `SELECT artist_handle, source_url, status, scheduled_for
      FROM wallpapers
      WHERE status IN ('extracting', 'scheduled', 'publishing', 'failed')
      ORDER BY scheduled_for IS NULL, scheduled_for, created_at
-     LIMIT 10`,
-  ).all<QueuedWallpaper>();
-
-  if (result.results.length === 0) {
-    return "Your wallpaper queue is empty.";
-  }
+     LIMIT ? OFFSET ?`,
+  )
+    .bind(QUEUE_PAGE_SIZE, offset)
+    .all<QueuedWallpaper>();
 
   const entries = result.results.map((wallpaper, index) => {
     const artist = wallpaper.artist_handle ?? "Unknown artist";
@@ -620,10 +652,18 @@ async function buildQueueMessage(env: BotEnv): Promise<string> {
         : wallpaper.scheduled_for
           ? `${formatTehranTime(wallpaper.scheduled_for)} (${wallpaper.status})`
           : "Awaiting extraction";
-    return `${index + 1}. ${artist} — ${state}`;
+    return `${offset + index + 1}. ${artist} — ${state}`;
   });
 
-  return ["Wallpaper queue", "", ...entries].join("\n");
+  const start = offset + 1;
+  const end = offset + result.results.length;
+  const navigation: Array<{ text: string; callback_data: string }> = [];
+  if (page > 0) navigation.push({ text: "‹ Previous", callback_data: `qp:${page - 1}` });
+  if (page < pageCount - 1) navigation.push({ text: "Next ›", callback_data: `qp:${page + 1}` });
+  return {
+    text: [`Wallpaper queue — ${start}–${end} of ${total}`, "", ...entries].join("\n"),
+    ...(navigation.length > 0 ? { replyMarkup: { inline_keyboard: [navigation] } } : {}),
+  };
 }
 
 function formatTehranTime(value: string): string {
