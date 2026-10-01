@@ -1544,7 +1544,7 @@ async function sendRescheduleChoices(wallpaperId: string, env: BotEnv, messageId
     env,
     env.OWNER_TELEGRAM_USER_ID,
     messageId,
-    `Choose a slot — page ${page + 1}/${pageCount}\n\n○ Free: move here\n🔒 Occupied: swap with that wallpaper\n✓ Current: keep your existing time`,
+    `Choose a slot — page ${page + 1}/${pageCount}`,
     {
       inline_keyboard: [...slots.slice(page * 6, page * 6 + 6).map((slot) => {
         const owner = owners.get(slot.toISOString());

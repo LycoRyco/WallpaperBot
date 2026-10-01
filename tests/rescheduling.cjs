@@ -77,6 +77,7 @@ const time = id => db.prepare('SELECT scheduled_for FROM wallpapers WHERE id = ?
   assert.ok(labels.includes('○ Free'));
   assert.ok(!labels.includes('Artist-c'));
   assert.ok(!calls.at(-1).text.includes('Tehran'));
+  assert.equal(calls.at(-1).text.split('\n').length, 1);
   await helpers.sendRescheduleChoices('a', env, 101, 1);
   assert.ok(calls.at(-1).text.includes('page 2/'));
   assert.ok(calls.at(-1).reply_markup.inline_keyboard.flat().some(b => b.text === '‹ Previous'));
