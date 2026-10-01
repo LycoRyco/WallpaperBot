@@ -25,7 +25,7 @@ These controls edit the status card. Each selection screen includes **Back** to 
 | `/start` or `/help` | Shows the persistent keyboard and owner command menu. |
 | `/queue` | Lists current queued items and their Tehran-time slots. |
 | `/clearqueue` | Permanently removes every queued item after confirmation. Published history stays intact. |
-| `/clearpublished` | Lets you choose one of the last three published records to forget, allowing that X link to be submitted again. Existing Telegram posts stay intact. |
+| `/clearpublished` | Lets you choose one of the last three published records to forget. Add an X post link (`/clearpublished https://x.com/artist/status/123`) to select any specific published record instead. Confirmation is required; queued items and existing Telegram posts stay intact. |
 | `/connectpublic` | Safely connects or replaces the public publishing channel. |
 | `/connectarchive` | Safely connects or replaces the private archive channel. |
 

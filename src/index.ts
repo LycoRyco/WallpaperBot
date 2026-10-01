@@ -301,7 +301,8 @@ async function handleOwnerMessage(
         "/start — show this message",
         "/queue — view the current queue",
         "/clearqueue — permanently clear queued items",
-        "/clearpublished — allow one of the last three posts to be reused",
+        "/clearpublished — choose a recent post to reuse",
+        "/clearpublished <X link> — allow that specific post to be reused",
         "/connectpublic — connect a public channel with a one-time code",
         "/connectarchive — connect the private archive channel with a one-time code",
       ].join("\n"),
@@ -329,8 +330,13 @@ async function handleOwnerMessage(
     return;
   }
 
-  if (text === "/clearpublished") {
-    await showPublishedHistoryChoices(chatId, env);
+  const clearPublishedCommand = text.match(/^\/clearpublished(?:@\w+)?(?:\s+([\s\S]+))?$/i);
+  if (clearPublishedCommand) {
+    if (clearPublishedCommand[1]) {
+      await showPublishedHistoryForLink(chatId, clearPublishedCommand[1].trim(), env);
+    } else {
+      await showPublishedHistoryChoices(chatId, env);
+    }
     return;
   }
 
@@ -378,7 +384,7 @@ async function ensureOwnerCommandMenu(env: BotEnv): Promise<void> {
         { command: "start", description: "Show the bot controls" },
         { command: "queue", description: "View the wallpaper queue" },
         { command: "clearqueue", description: "Permanently clear the queue" },
-        { command: "clearpublished", description: "Reuse one of the last three posts" },
+        { command: "clearpublished", description: "Reuse a published post (optional X link)" },
         { command: "connectpublic", description: "Connect the public channel" },
         { command: "connectarchive", description: "Connect the private archive" },
         { command: "help", description: "Show help" },
@@ -545,15 +551,7 @@ async function handleCallbackQuery(
       return;
     }
     await answerCallbackQuery(env, callbackId);
-    await sendTelegramMessage(
-      env,
-      env.OWNER_TELEGRAM_USER_ID,
-      "Allow this X post to be submitted again? This removes only the bot’s published-history record. The public post and private archive files stay untouched.",
-      { inline_keyboard: [[
-        { text: "Yes, allow reuse", callback_data: `d:${wallpaperId}` },
-        { text: "Keep its history", callback_data: `k:${wallpaperId}` },
-      ]] },
-    );
+    await confirmPublishedHistoryRemoval(Number(env.OWNER_TELEGRAM_USER_ID), wallpaperId, wallpaper.source_url, env);
     return;
   }
 
@@ -778,7 +776,7 @@ function parseXPostLink(text: string): XPostLink | null {
 
   return {
     postId: match[1],
-    canonicalUrl: `https://x.com${url.pathname.replace(/\/$/, "")}`,
+    canonicalUrl: `https://x.com${url.pathname.slice(0, match.index! + match[0].length).replace(/\/$/, "")}`,
   };
 }
 
@@ -1172,7 +1170,7 @@ function previewControls(wallpaperId: string): TelegramInlineKeyboard {
 
 function buildChannelCaption(artistHandle: string, sourceUrl: string, channelHandle: string): string {
   const safeArtist = escapeHtml(artistHandle);
-  const safeSource = escapeHtml(sourceUrl);
+  const safeSource = escapeHtml(parseXPostLink(sourceUrl)?.canonicalUrl ?? sourceUrl);
   return [
     `Artist: <a href="https://x.com/${safeArtist}">${safeArtist}</a>`,
     "Wallpaper Source: X (Twitter)",
@@ -1639,6 +1637,33 @@ async function clearQueuedWallpapers(env: BotEnv): Promise<void> {
     console.error("Queue clearing failed", error);
     await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "The queue could not be fully cleared. Nothing else was deleted automatically.");
   }
+}
+
+async function showPublishedHistoryForLink(chatId: number, link: string, env: BotEnv): Promise<void> {
+  const post = parseXPostLink(link);
+  if (!post) {
+    await sendTelegramMessage(env, chatId, "Send /clearpublished followed by one valid X post link.");
+    return;
+  }
+  const wallpaper = await env.WALLPAPERBOT_DB.prepare(
+    "SELECT id FROM wallpapers WHERE x_post_id = ? AND status = 'published'",
+  ).bind(post.postId).first<WallpaperId>();
+  if (!wallpaper) {
+    await sendTelegramMessage(env, chatId, "No published-history record was found for that X post. Your queue is unchanged.");
+    return;
+  }
+  await confirmPublishedHistoryRemoval(chatId, wallpaper.id, post.canonicalUrl, env);
+}
+
+async function confirmPublishedHistoryRemoval(chatId: number, wallpaperId: string, sourceUrl: string, env: BotEnv): Promise<void> {
+  const link = parseXPostLink(sourceUrl)?.canonicalUrl ?? sourceUrl;
+  await sendTelegramMessage(env, chatId,
+    `Allow this X post to be submitted again?\n${link}\n\nOnly its published-history record will be removed. Public posts and private archive files stay untouched.`,
+    { inline_keyboard: [[
+      { text: "Yes, allow reuse", callback_data: `d:${wallpaperId}` },
+      { text: "Keep its history", callback_data: `k:${wallpaperId}` },
+    ]] },
+  );
 }
 
 async function showPublishedHistoryChoices(chatId: number, env: BotEnv): Promise<void> {

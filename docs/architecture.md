@@ -57,7 +57,7 @@ Duplicate behavior:
 - **Queued, ready, scheduled, or published:** the bot returns its existing status instead of downloading it again.
 - **Failed:** sending the link again starts a fresh retry cycle for that same post.
 
-The owner can deliberately forget one of the last three published-history records with `/clearpublished` when a repost is wanted.
+The owner can deliberately forget one of the last three published-history records with `/clearpublished` when a repost is wanted, or select any published record using `/clearpublished <X link>`. X source links are normalized to the post URL without media suffixes, query strings, or fragments before storage and caption rendering. Duplicate checks and history lookup use the numeric X post ID.
 
 ### 2. Extract and archive
 
