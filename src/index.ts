@@ -346,7 +346,8 @@ async function handleOwnerMessage(
 
   const xPost = parseXPostLink(text);
   if (xPost) {
-    await sendTelegramMessage(env, chatId, await receiveXPost(xPost, env, chatId, ctx));
+    const reply = await receiveXPost(xPost, env, chatId, ctx);
+    if (reply) await sendTelegramMessage(env, chatId, reply);
     return;
   }
 
@@ -673,7 +674,11 @@ async function buildQueueView(env: BotEnv, requestedPage: number): Promise<Queue
   if (page > 0) navigation.push({ text: "‹ Previous", callback_data: `qp:${page - 1}` });
   if (page < pageCount - 1) navigation.push({ text: "Next ›", callback_data: `qp:${page + 1}` });
   return {
-    text: [`Wallpaper queue — ${start}–${end} of ${total}`, "", ...entries].join("\n"),
+    text: [
+      `Wallpaper queue — ${start}–${end} of ${total}`,
+      "",
+      ...entries,
+    ].join("\n"),
     ...(navigation.length > 0 ? { replyMarkup: { inline_keyboard: [navigation] } } : {}),
   };
 }
@@ -727,7 +732,7 @@ async function receiveXPost(
   env: BotEnv,
   chatId: number,
   ctx: ExecutionContext,
-): Promise<string> {
+): Promise<string | null> {
   const existing = await env.WALLPAPERBOT_DB.prepare(
     "SELECT id, status, scheduled_for FROM wallpapers WHERE x_post_id = ?",
   )
@@ -748,27 +753,26 @@ async function receiveXPost(
         ).bind(existing.id),
       ]);
       ctx.waitUntil(recoverExistingExtraction(existing.id, xPost.postId, chatId, env));
-      return "That post previously failed. Its extraction retry cycle has been restarted.";
+      return "Retrying this wallpaper.";
     }
 
     if (existing.status === "extracting") {
-      ctx.waitUntil(recoverExistingExtraction(existing.id, xPost.postId, chatId, env));
-      return "That X post is already being processed. I’ll continue recovering it if needed.";
+      return "This wallpaper is still being prepared.";
     }
 
     if (existing.status === "published") {
-      return "That X post was already published to the connected channel. I will not publish a duplicate.";
+      return "Already published. Use /clearpublished if you want to post it again.";
     }
 
     if (existing.status === "publishing") {
-      return "That X post is already being published. I will not start another copy.";
+      return "This wallpaper is being published.";
     }
 
     if (existing.status === "scheduled" && existing.scheduled_for) {
-      return `That X post is already queued for ${formatTehranTime(existing.scheduled_for)}.`;
+      return `Already scheduled: ${formatTehranTime(existing.scheduled_for)} (Tehran).`;
     }
 
-    return "That X post is already known to the bot.";
+    return "This wallpaper is already in your queue.";
   }
 
   const wallpaperId = crypto.randomUUID();
@@ -784,11 +788,7 @@ async function receiveXPost(
 
   ctx.waitUntil(extractAndStoreMetadata(wallpaperId, xPost.postId, chatId, env));
 
-  return [
-    "X post accepted.",
-    "",
-    "I’m checking its media now. A schedule slot will be assigned only after every image has been safely archived.",
-  ].join("\n");
+  return null;
 }
 
 async function extractAndStoreMetadata(
@@ -835,11 +835,6 @@ async function extractAndStoreMetadata(
     ]);
 
     await archiveExtractedWallpaper(wallpaperId, chatId, env);
-    await sendTelegramMessage(
-      env,
-      chatId,
-      `Archived ${extracted.images.length} original image(s) by ${extracted.artistHandle}. No publication slot has been reserved yet.`,
-    );
   } catch (error) {
     const extractionError =
       error instanceof FxEmbedError
@@ -869,7 +864,6 @@ async function recoverExistingExtraction(
 
   try {
     await archiveExtractedWallpaper(wallpaperId, chatId, env);
-    await sendTelegramMessage(env, chatId, "The missing archive uploads have been recovered.");
   } catch (error) {
     const archiveError = toArchiveError(error);
     const outcome = await recordExtractionFailure(wallpaperId, archiveError, env);
@@ -942,6 +936,12 @@ async function archiveExtractedWallpaper(
     .run();
 
   await assignNextAvailableSlot(wallpaperId, env);
+  const ready = await env.WALLPAPERBOT_DB.prepare(
+    "SELECT scheduled_for FROM wallpapers WHERE id = ?",
+  ).bind(wallpaperId).first<{ scheduled_for: string | null }>();
+  if (ready && !ready.scheduled_for) {
+    await sendTelegramMessage(env, chatId, "Wallpaper ready. Waiting for an available slot; check /queue for its status.");
+  }
 }
 
 async function assignSlotsForArchivedWallpapers(env: BotEnv): Promise<void> {
@@ -1055,24 +1055,51 @@ async function sendScheduledPreview(wallpaperId: string, env: BotEnv): Promise<v
   }
 
   const text = [
-    "Wallpaper preview",
-    `Scheduled: ${formatTehranTime(wallpaper.scheduled_for)} Tehran time`,
+    `Wallpaper • ${wallpaper.artist_handle}`,
+    `Scheduled: ${formatTehranTime(wallpaper.scheduled_for)} (Tehran)`,
     `Images: ${media.results.length}`,
-    "",
-    "The visual preview and exact channel caption are shown above.",
+    ...(!visualSent ? ["Preview unavailable. Open /queue to retry the preview."] : []),
   ].join("\n");
-  const sent = await sendTelegramMessage(
-    env,
-    env.OWNER_TELEGRAM_USER_ID,
-    text,
-    previewControls(wallpaper.id),
-  );
+  let sent = await updateWallpaperCard(wallpaper.id, text, previewControls(wallpaper.id), env);
+  if (!sent) {
+    const card = await telegramApi(env, "sendMessage", {
+      chat_id: env.OWNER_TELEGRAM_USER_ID,
+      text,
+      reply_markup: previewControls(wallpaper.id),
+    }) as { message_id: number };
+    await env.WALLPAPERBOT_DB.prepare(
+      "INSERT INTO wallpaper_events (wallpaper_id, event_type, details_json) VALUES (?, 'preview_card', ?)",
+    ).bind(wallpaper.id, JSON.stringify({ messageId: card.message_id })).run();
+    sent = true;
+  }
   if (sent && visualSent) {
     await env.WALLPAPERBOT_DB.prepare(
       "INSERT INTO wallpaper_events (wallpaper_id, event_type) VALUES (?, 'preview_sent')",
     )
       .bind(wallpaperId)
       .run();
+  }
+}
+
+async function updateWallpaperCard(
+  wallpaperId: string,
+  text: string,
+  replyMarkup: TelegramInlineKeyboard | undefined,
+  env: BotEnv,
+): Promise<boolean> {
+  try {
+    const event = await env.WALLPAPERBOT_DB.prepare(
+      `SELECT details_json FROM wallpaper_events
+       WHERE wallpaper_id = ? AND event_type = 'preview_card' ORDER BY id DESC LIMIT 1`,
+    ).bind(wallpaperId).first<{ details_json: string }>();
+    if (!event) return false;
+    const { messageId } = JSON.parse(event.details_json) as { messageId?: number };
+    if (typeof messageId !== "number" || !Number.isInteger(messageId)) return false;
+    await editTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, messageId, text, replyMarkup);
+    return true;
+  } catch (error) {
+    console.warn("Could not update wallpaper status card", error);
+    return false;
   }
 }
 
@@ -1411,16 +1438,16 @@ async function notifyExtractionFailure(
       await sendTelegramMessage(
         env,
         chatId,
-        `Could not process this X post yet. I will retry automatically in 10 minutes (attempt 1 of 3): ${error.message}`,
+        `Couldn’t prepare this wallpaper. Retrying in 10 minutes.\n${error.message}`,
       );
     }
     return;
   }
 
   const reason = error.retryable
-    ? `after ${outcome.attemptNumber} attempts`
-    : "because this error cannot be retried automatically";
-  await sendTelegramMessage(env, chatId, `Could not process this X post ${reason}: ${error.message}`);
+    ? `Preparation failed after ${outcome.attemptNumber} attempts.`
+    : "This post cannot be processed.";
+  await sendTelegramMessage(env, chatId, `${reason}\n${error.message}`);
 }
 
 async function sendRescheduleChoices(wallpaperId: string, env: BotEnv): Promise<void> {
@@ -1715,13 +1742,10 @@ async function publishWallpaper(
         "INSERT INTO wallpaper_events (wallpaper_id, event_type) VALUES (?, 'published')",
       ).bind(wallpaperId),
     ]);
-    await sendTelegramMessage(
-      env,
-      env.OWNER_TELEGRAM_USER_ID,
-      automatic
-        ? "Scheduled wallpaper published successfully to the connected channel."
-        : "Wallpaper published successfully to the connected test channel.",
-    );
+    const publishedText = `Wallpaper • ${wallpaper.artist_handle}\nPublished: ${formatTehranTime(new Date().toISOString())} (Tehran)\nImages: ${media.results.length}`;
+    if (!(await updateWallpaperCard(wallpaperId, publishedText, undefined, env))) {
+      await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, `Published: ${wallpaper.artist_handle}.`);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : "An unexpected publication error occurred.";
     const retryAt = attemptNumber < 3;
@@ -1736,13 +1760,12 @@ async function publishWallpaper(
       message,
       wallpaperId,
     ).run();
-    await sendTelegramMessage(
-      env,
-      env.OWNER_TELEGRAM_USER_ID,
-      retryAt
-        ? `Could not publish this wallpaper. I will retry in 10 minutes (attempt ${attemptNumber} of 3): ${message}`
-        : `Could not publish this wallpaper after 3 attempts: ${message}`,
-    );
+    const failureText = retryAt
+      ? `Publication delayed. Retrying in 10 minutes (attempt ${attemptNumber} of 3).\n${message}`
+      : `Publication failed after 3 attempts.\n${message}`;
+    if (!(await updateWallpaperCard(wallpaperId, failureText, retryAt ? previewControls(wallpaperId) : undefined, env))) {
+      await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, failureText);
+    }
   }
 }
 

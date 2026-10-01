@@ -8,6 +8,8 @@ The preview appears once for each newly scheduled wallpaper. `/queue` is only a 
 
 The queue shows ten items per page. Its Previous and Next buttons update the same message, keeping navigation out of the chat history.
 
+Successful submissions show the visual preview and a compact status card, without separate acceptance or archive notices. New status cards are edited after publication to show the publishing time and remove their controls. Older previews created before message tracking was added receive a short separate publication notice.
+
 Leave a scheduled wallpaper alone for automatic publication, or use its buttons:
 
 - **Publish now** — posts to the currently connected public channel.
