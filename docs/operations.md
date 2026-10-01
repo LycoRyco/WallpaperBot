@@ -6,6 +6,8 @@ Send a public X image-post link to WallpaperBot in your private chat. The bot va
 
 The preview appears once for each newly scheduled wallpaper. `/queue` is only a compact schedule list; it does not resend previews.
 
+The queue shows ten items per page. Its Previous and Next buttons update the same message, keeping navigation out of the chat history.
+
 Leave a scheduled wallpaper alone for automatic publication, or use its buttons:
 
 - **Publish now** — posts to the currently connected public channel.

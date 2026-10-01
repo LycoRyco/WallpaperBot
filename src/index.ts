@@ -31,6 +31,10 @@ type TelegramUpdate = {
     id?: string;
     from?: { id?: number };
     data?: string;
+    message?: {
+      message_id?: number;
+      chat?: { id?: number };
+    };
   };
 };
 
@@ -498,13 +502,21 @@ async function handleCallbackQuery(
   }
   if (data.startsWith("qp:")) {
     const page = Number(data.slice(3));
-    if (!Number.isInteger(page) || page < 0) {
+    const messageId = callback?.message?.message_id;
+    const chatId = callback?.message?.chat?.id;
+    if (!Number.isInteger(page) || page < 0 || messageId === undefined ||
+        String(chatId) !== env.OWNER_TELEGRAM_USER_ID) {
       await answerCallbackQuery(env, callbackId, "This queue page is no longer valid.");
       return;
     }
     await answerCallbackQuery(env, callbackId);
-    const view = await buildQueueView(env, page);
-    await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, view.text, view.replyMarkup);
+    try {
+      const view = await buildQueueView(env, page);
+      await editTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, messageId, view.text, view.replyMarkup);
+    } catch (error) {
+      console.error("Could not update queue page", error);
+      await answerCallbackQuery(env, callbackId, "Could not update this queue. Send /queue to open it again.");
+    }
     return;
   }
 
@@ -1817,6 +1829,27 @@ async function sendTelegramMessage(
   } catch (error) {
     console.error("Telegram sendMessage failed", error);
     return false;
+  }
+}
+
+async function editTelegramMessage(
+  env: BotEnv,
+  chatId: number | string,
+  messageId: number,
+  text: string,
+  replyMarkup?: TelegramInlineKeyboard,
+): Promise<void> {
+  try {
+    await telegramApi(env, "editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      reply_markup: replyMarkup ?? { inline_keyboard: [] },
+    });
+  } catch (error) {
+    // Repeated taps or a shrinking queue may resolve to the displayed page.
+    if (error instanceof Error && error.message.includes("message is not modified")) return;
+    throw error;
   }
 }
 
