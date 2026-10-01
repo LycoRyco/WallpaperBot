@@ -527,17 +527,14 @@ async function handleCallbackQuery(
     return;
   }
 
-  if (action === "c") {
+  if (["c", "x", "r", "p", "P", "b"].includes(action)) {
+    const messageId = callback?.message?.message_id;
+    if (messageId === undefined || String(callback?.message?.chat?.id) !== env.OWNER_TELEGRAM_USER_ID) {
+      await answerCallbackQuery(env, callbackId, "This control is no longer available.");
+      return;
+    }
     await answerCallbackQuery(env, callbackId);
-    await sendTelegramMessage(
-      env,
-      env.OWNER_TELEGRAM_USER_ID,
-      "Cancel this wallpaper permanently? Its queue record and private archive files will be deleted.",
-      { inline_keyboard: [[
-        { text: "Yes, cancel permanently", callback_data: `x:${wallpaperId}` },
-        { text: "Keep it", callback_data: `k:${wallpaperId}` },
-      ]] },
-    );
+    ctx.waitUntil(handleWallpaperControl(action, wallpaperId, value, messageId, env));
     return;
   }
 
@@ -565,32 +562,90 @@ async function handleCallbackQuery(
     return;
   }
 
-  if (action === "x") {
-    await answerCallbackQuery(env, callbackId, "Canceling wallpaper…");
-    ctx.waitUntil(cancelWallpaper(wallpaperId, env));
-    return;
-  }
-
   if (action === "d") {
     await answerCallbackQuery(env, callbackId, "Removing published-history record…");
     ctx.waitUntil(forgetPublishedWallpaper(wallpaperId, env));
     return;
   }
 
-  if (action === "r") {
-    if (value) {
-      await answerCallbackQuery(env, callbackId, "Rescheduling wallpaper…");
-      ctx.waitUntil(rescheduleWallpaper(wallpaperId, Number(value), env));
-    } else {
-      await answerCallbackQuery(env, callbackId);
-      await sendRescheduleChoices(wallpaperId, env);
-    }
+}
+
+function backControl(wallpaperId: string): { text: string; callback_data: string } {
+  return { text: "‹ Back", callback_data: `b:${wallpaperId}` };
+}
+
+async function restoreWallpaperCard(wallpaperId: string, messageId: number, env: BotEnv): Promise<void> {
+  const wallpaper = await getControlWallpaper(wallpaperId, env);
+  if (!wallpaper) {
+    await editTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, messageId, "This wallpaper is no longer in the queue.");
     return;
   }
+  const media = await env.WALLPAPERBOT_DB.prepare(
+    "SELECT COUNT(*) AS count FROM media WHERE wallpaper_id = ?",
+  ).bind(wallpaperId).first<{ count: number }>();
+  const text = [
+    `Wallpaper • ${wallpaper.artist_handle ?? "Unknown artist"}`,
+    wallpaper.status === "scheduled" && wallpaper.scheduled_for
+      ? `Scheduled: ${formatTehranTime(wallpaper.scheduled_for)} (Tehran)`
+      : `Status: ${wallpaper.status}`,
+    `Images: ${media?.count ?? 0}`,
+  ].join("\n");
+  await editTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, messageId, text,
+    wallpaper.status === "scheduled" ? previewControls(wallpaperId) : undefined);
+}
 
-  if (action === "p") {
-    await answerCallbackQuery(env, callbackId, "Publishing to the connected channel…");
-    ctx.waitUntil(publishWallpaper(wallpaperId, env));
+async function handleWallpaperControl(
+  action: string,
+  wallpaperId: string,
+  value: string | undefined,
+  messageId: number,
+  env: BotEnv,
+): Promise<void> {
+  try {
+    const wallpaper = await getControlWallpaper(wallpaperId, env);
+    if (!wallpaper || wallpaper.status !== "scheduled") {
+      await restoreWallpaperCard(wallpaperId, messageId, env);
+      return;
+    }
+    // Adopt older preview cards too, so publication can update their status.
+    const details = JSON.stringify({ messageId });
+    const saved = await env.WALLPAPERBOT_DB.prepare(
+      "SELECT details_json FROM wallpaper_events WHERE wallpaper_id = ? AND event_type = 'preview_card' ORDER BY id DESC LIMIT 1",
+    ).bind(wallpaperId).first<{ details_json: string }>();
+    if (saved?.details_json !== details) {
+      await env.WALLPAPERBOT_DB.prepare(
+        "INSERT INTO wallpaper_events (wallpaper_id, event_type, details_json) VALUES (?, 'preview_card', ?)",
+      ).bind(wallpaperId, details).run();
+    }
+    if (action === "b") {
+      await restoreWallpaperCard(wallpaperId, messageId, env);
+    } else if (action === "c" || action === "p") {
+      await editTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, messageId,
+        action === "c"
+          ? `Cancel ${wallpaper.artist_handle ?? "this wallpaper"}? Its queued item and archive files will be deleted.`
+          : `Publish ${wallpaper.artist_handle ?? "this wallpaper"} to the connected channel now?`,
+        { inline_keyboard: [
+          [{ text: action === "c" ? "Confirm cancellation" : "Confirm publish", callback_data: `${action === "c" ? "x" : "P"}:${wallpaperId}` }],
+          [backControl(wallpaperId)],
+        ] });
+    } else if (action === "r") {
+      if (value) await rescheduleWallpaper(wallpaperId, Number(value), env, messageId);
+      else await sendRescheduleChoices(wallpaperId, env, messageId);
+    } else if (action === "x") {
+      await cancelWallpaper(wallpaperId, env, messageId);
+    } else if (action === "P") {
+      await editTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, messageId, "Publishing…");
+      await publishWallpaper(wallpaperId, env);
+    }
+  } catch (error) {
+    console.error("Wallpaper control failed", error);
+    try {
+      await editTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, messageId,
+        "Couldn’t complete this action. Check the wallpaper’s current status before trying again.",
+        { inline_keyboard: [[backControl(wallpaperId)]] });
+    } catch (editError) {
+      console.error("Could not display control error", editError);
+    }
   }
 }
 
@@ -1450,28 +1505,31 @@ async function notifyExtractionFailure(
   await sendTelegramMessage(env, chatId, `${reason}\n${error.message}`);
 }
 
-async function sendRescheduleChoices(wallpaperId: string, env: BotEnv): Promise<void> {
+async function sendRescheduleChoices(wallpaperId: string, env: BotEnv, messageId: number): Promise<void> {
   const wallpaper = await getControlWallpaper(wallpaperId, env);
   if (!wallpaper || wallpaper.status !== "scheduled") {
-    await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "That wallpaper is no longer available to reschedule.");
+    await restoreWallpaperCard(wallpaperId, messageId, env);
     return;
   }
 
   const slots = await availableFutureSlots(wallpaperId, env);
   if (slots.length === 0) {
-    await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "There are no free future slots available yet.");
+    await editTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, messageId,
+      "There are no free future slots available yet.",
+      { inline_keyboard: [[backControl(wallpaperId)]] });
     return;
   }
 
-  await sendTelegramMessage(
+  await editTelegramMessage(
     env,
     env.OWNER_TELEGRAM_USER_ID,
+    messageId,
     "Choose a new Tehran-time publication slot:",
     {
-      inline_keyboard: slots.slice(0, 6).map((slot) => [{
+      inline_keyboard: [...slots.slice(0, 6).map((slot) => [{
         text: formatTehranTime(slot.toISOString()),
         callback_data: `r:${wallpaperId}:${slot.getTime()}`,
-      }]),
+      }]), [backControl(wallpaperId)]],
     },
   );
 }
@@ -1491,12 +1549,15 @@ async function rescheduleWallpaper(
   wallpaperId: string,
   milliseconds: number,
   env: BotEnv,
+  messageId: number,
 ): Promise<void> {
   const slot = new Date(milliseconds);
   const validSlot = Number.isFinite(slot.getTime()) && (await availableFutureSlots(wallpaperId, env))
     .some((candidate) => candidate.getTime() === slot.getTime());
   if (!validSlot) {
-    await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "That time slot is no longer available. Choose Reschedule again.");
+    await editTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, messageId,
+      "That slot is no longer available. Go back and choose Reschedule again.",
+      { inline_keyboard: [[backControl(wallpaperId)]] });
     return;
   }
 
@@ -1509,7 +1570,7 @@ async function rescheduleWallpaper(
     .bind(scheduledFor, wallpaperId)
     .run();
   if (result.meta.changes !== 1) {
-    await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "That wallpaper can no longer be rescheduled.");
+    await restoreWallpaperCard(wallpaperId, messageId, env);
     return;
   }
 
@@ -1518,18 +1579,14 @@ async function rescheduleWallpaper(
   )
     .bind(wallpaperId, JSON.stringify({ scheduledFor }))
     .run();
-  await sendTelegramMessage(
-    env,
-    env.OWNER_TELEGRAM_USER_ID,
-    `Rescheduled for ${formatTehranTime(scheduledFor)} Tehran time.`,
-  );
+  await restoreWallpaperCard(wallpaperId, messageId, env);
 }
 
-async function cancelWallpaper(wallpaperId: string, env: BotEnv): Promise<void> {
+async function cancelWallpaper(wallpaperId: string, env: BotEnv, messageId: number): Promise<void> {
   const wallpaper = await getControlWallpaper(wallpaperId, env);
   const archiveChannelId = await getBotSetting("archive_channel_id", env);
   if (!wallpaper || wallpaper.status !== "scheduled" || !archiveChannelId) {
-    await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "That wallpaper can no longer be canceled.");
+    await restoreWallpaperCard(wallpaperId, messageId, env);
     return;
   }
 
@@ -1542,7 +1599,7 @@ async function cancelWallpaper(wallpaperId: string, env: BotEnv): Promise<void> 
     env.WALLPAPERBOT_DB.prepare("DELETE FROM media WHERE wallpaper_id = ?").bind(wallpaperId),
     env.WALLPAPERBOT_DB.prepare("DELETE FROM wallpapers WHERE id = ?").bind(wallpaperId),
   ]);
-  await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, "Wallpaper canceled and its private archive files were deleted.");
+  await editTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, messageId, "Wallpaper canceled. Its queue record and archive files were deleted.");
 }
 
 async function clearQueuedWallpapers(env: BotEnv): Promise<void> {

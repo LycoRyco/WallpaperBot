@@ -12,9 +12,11 @@ Successful submissions show the visual preview and a compact status card, withou
 
 Leave a scheduled wallpaper alone for automatic publication, or use its buttons:
 
-- **Publish now** — posts to the currently connected public channel.
-- **Reschedule** — offers the next six free Tehran-time slots.
+- **Publish now** — opens a confirmation screen in the status card, then posts to the currently connected public channel after confirmation.
+- **Reschedule** — shows the next six free Tehran-time slots in the same card. Selecting a slot updates the displayed schedule.
 - **Cancel** — asks for confirmation, then deletes the queued item and its private archive files.
+
+These controls edit the status card. Each selection screen includes **Back** to return to the wallpaper controls before confirming an action.
 
 ## Commands
 
@@ -48,3 +50,4 @@ If extraction, archiving, or publication temporarily fails, the bot retries afte
 - The private archive channel is internal storage. Public channel users cannot see its files.
 - The bot does not use Telegram’s native Scheduled Messages interface; Telegram does not let normal bots manage that interface. The bot’s own `/queue` is the schedule source of truth.
 - Published-history removal is intended for deliberate reposting or testing. It does not delete existing public channel messages.
+- Manually deleting a public channel post does not remove its published-history record. Use `/clearpublished` to allow the source link again.
