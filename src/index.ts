@@ -80,6 +80,12 @@ type OccupiedSlot = {
   scheduled_for: string;
 };
 
+type RescheduleSlotOwner = OccupiedSlot & {
+  id: string;
+  status: string;
+  artist_handle: string | null;
+};
+
 type PreviewWallpaper = {
   id: string;
   artist_handle: string;
@@ -584,7 +590,7 @@ async function restoreWallpaperCard(wallpaperId: string, messageId: number, env:
   const text = [
     `Wallpaper • ${wallpaper.artist_handle ?? "Unknown artist"}`,
     wallpaper.status === "scheduled" && wallpaper.scheduled_for
-      ? `Scheduled: ${formatTehranTime(wallpaper.scheduled_for)} (Tehran)`
+      ? `Scheduled: ${formatTehranTime(wallpaper.scheduled_for)}`
       : `Status: ${wallpaper.status}`,
     `Images: ${media?.count ?? 0}`,
   ].join("\n");
@@ -627,7 +633,8 @@ async function handleWallpaperControl(
           [backControl(wallpaperId)],
         ] });
     } else if (action === "r") {
-      if (value) await rescheduleWallpaper(wallpaperId, Number(value), env, messageId);
+      if (value?.startsWith("page")) await sendRescheduleChoices(wallpaperId, env, messageId, Number(value.slice(4)));
+      else if (value) await rescheduleWallpaper(wallpaperId, Number(value), env, messageId);
       else await sendRescheduleChoices(wallpaperId, env, messageId);
     } else if (action === "x") {
       await cancelWallpaper(wallpaperId, env, messageId);
@@ -822,7 +829,7 @@ async function receiveXPost(
     }
 
     if (existing.status === "scheduled" && existing.scheduled_for) {
-      return `Already scheduled: ${formatTehranTime(existing.scheduled_for)} (Tehran).`;
+      return `Already scheduled: ${formatTehranTime(existing.scheduled_for)}.`;
     }
 
     return "This wallpaper is already in your queue.";
@@ -1109,7 +1116,7 @@ async function sendScheduledPreview(wallpaperId: string, env: BotEnv): Promise<v
 
   const text = [
     `Wallpaper • ${wallpaper.artist_handle}`,
-    `Scheduled: ${formatTehranTime(wallpaper.scheduled_for)} (Tehran)`,
+    `Scheduled: ${formatTehranTime(wallpaper.scheduled_for)}`,
     `Images: ${media.results.length}`,
     ...(!visualSent ? ["Preview unavailable. Open /queue to retry the preview."] : []),
   ].join("\n");
@@ -1503,44 +1510,51 @@ async function notifyExtractionFailure(
   await sendTelegramMessage(env, chatId, `${reason}\n${error.message}`);
 }
 
-async function sendRescheduleChoices(wallpaperId: string, env: BotEnv, messageId: number): Promise<void> {
+async function sendRescheduleChoices(wallpaperId: string, env: BotEnv, messageId: number, requestedPage = 0): Promise<void> {
   const wallpaper = await getControlWallpaper(wallpaperId, env);
   if (!wallpaper || wallpaper.status !== "scheduled") {
     await restoreWallpaperCard(wallpaperId, messageId, env);
     return;
   }
 
-  const slots = await availableFutureSlots(wallpaperId, env);
+  const futureSlots = futureTehranSlots(new Date());
+  const occupied = await env.WALLPAPERBOT_DB.prepare(
+    `SELECT id, scheduled_for, status, artist_handle FROM wallpapers
+     WHERE status IN ('scheduled', 'publishing') AND scheduled_for IS NOT NULL`,
+  ).all<RescheduleSlotOwner>();
+  const owners = new Map(occupied.results.map((item) => [item.scheduled_for, item]));
+  const canSwap = futureSlots.some((slot) => slot.toISOString() === wallpaper.scheduled_for);
+  const slots = futureSlots.filter((slot) => {
+    const owner = owners.get(slot.toISOString());
+    return !owner || owner.id === wallpaperId || (canSwap && owner.status === "scheduled");
+  });
   if (slots.length === 0) {
     await editTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, messageId,
-      "There are no free future slots available yet.",
+      "There are no future slots available yet.",
       { inline_keyboard: [[backControl(wallpaperId)]] });
     return;
   }
 
+  const pageCount = Math.ceil(slots.length / 6);
+  const page = Number.isInteger(requestedPage) ? Math.max(0, Math.min(requestedPage, pageCount - 1)) : 0;
+  const navigation = [];
+  if (page > 0) navigation.push({ text: "‹ Previous", callback_data: `r:${wallpaperId}:page${page - 1}` });
+  if (page + 1 < pageCount) navigation.push({ text: "Next ›", callback_data: `r:${wallpaperId}:page${page + 1}` });
   await editTelegramMessage(
     env,
     env.OWNER_TELEGRAM_USER_ID,
     messageId,
-    "Choose a new Tehran-time publication slot:",
+    `Choose a slot — page ${page + 1}/${pageCount}\n\n○ Free: move here\n🔒 Occupied: swap with that wallpaper\n✓ Current: keep your existing time`,
     {
-      inline_keyboard: [...slots.slice(0, 6).map((slot) => [{
-        text: formatTehranTime(slot.toISOString()),
-        callback_data: `r:${wallpaperId}:${slot.getTime()}`,
-      }]), [backControl(wallpaperId)]],
+      inline_keyboard: [...slots.slice(page * 6, page * 6 + 6).map((slot) => {
+        const owner = owners.get(slot.toISOString());
+        const label = owner?.id === wallpaperId ? "✓ Current"
+          : owner ? `🔒 ${owner.artist_handle ?? "Unknown artist"}` : "○ Free";
+        return [{ text: `${formatTehranTime(slot.toISOString())} · ${label}`,
+          callback_data: `r:${wallpaperId}:${slot.getTime()}` }];
+      }), ...(navigation.length ? [navigation] : []), [backControl(wallpaperId)]],
     },
   );
-}
-
-async function availableFutureSlots(wallpaperId: string, env: BotEnv): Promise<Date[]> {
-  const occupiedResult = await env.WALLPAPERBOT_DB.prepare(
-    `SELECT scheduled_for FROM wallpapers
-     WHERE id != ? AND status IN ('scheduled', 'publishing') AND scheduled_for IS NOT NULL`,
-  )
-    .bind(wallpaperId)
-    .all<OccupiedSlot>();
-  const occupied = new Set(occupiedResult.results.map((wallpaper) => wallpaper.scheduled_for));
-  return futureTehranSlots(new Date()).filter((slot) => !occupied.has(slot.toISOString()));
 }
 
 async function rescheduleWallpaper(
@@ -1550,7 +1564,8 @@ async function rescheduleWallpaper(
   messageId: number,
 ): Promise<void> {
   const slot = new Date(milliseconds);
-  const validSlot = Number.isFinite(slot.getTime()) && (await availableFutureSlots(wallpaperId, env))
+  const futureSlots = futureTehranSlots(new Date());
+  const validSlot = Number.isFinite(slot.getTime()) && futureSlots
     .some((candidate) => candidate.getTime() === slot.getTime());
   if (!validSlot) {
     await editTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, messageId,
@@ -1560,12 +1575,72 @@ async function rescheduleWallpaper(
   }
 
   const scheduledFor = slot.toISOString();
+  const wallpaper = await getControlWallpaper(wallpaperId, env);
+  if (!wallpaper || wallpaper.status !== "scheduled") {
+    await restoreWallpaperCard(wallpaperId, messageId, env);
+    return;
+  }
+  if (wallpaper.scheduled_for === scheduledFor) {
+    await restoreWallpaperCard(wallpaperId, messageId, env);
+    return;
+  }
+  const occupied = await env.WALLPAPERBOT_DB.prepare(
+    `SELECT id, scheduled_for, status, artist_handle FROM wallpapers
+     WHERE scheduled_for = ? AND status IN ('scheduled', 'publishing')`,
+  ).bind(scheduledFor).first<RescheduleSlotOwner>();
+  if (occupied) {
+    if (occupied.status !== "scheduled" || !wallpaper.scheduled_for ||
+        !futureSlots.some((candidate) => candidate.toISOString() === wallpaper.scheduled_for)) {
+      await editTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, messageId,
+        "These wallpapers cannot be swapped: a slot is publishing or too close to its sending time. Choose another slot.",
+        { inline_keyboard: [[backControl(wallpaperId)]] });
+      return;
+    }
+    // D1 batches are transactions. A unique temporary value avoids the slot
+    // index conflict; guards make a stale/concurrent request a complete no-op.
+    const temporary = `swap-${crypto.randomUUID()}`;
+    const oldSlot = wallpaper.scheduled_for;
+    const results = await env.WALLPAPERBOT_DB.batch([
+      env.WALLPAPERBOT_DB.prepare(
+        `UPDATE wallpapers SET scheduled_for = ?
+         WHERE id = ? AND status = 'scheduled' AND scheduled_for = ?
+           AND EXISTS (SELECT 1 FROM wallpapers WHERE id = ? AND status = 'scheduled' AND scheduled_for = ?)`,
+      ).bind(temporary, wallpaperId, oldSlot, occupied.id, scheduledFor),
+      env.WALLPAPERBOT_DB.prepare(
+        `UPDATE wallpapers SET scheduled_for = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ? AND status = 'scheduled' AND scheduled_for = ?
+           AND EXISTS (SELECT 1 FROM wallpapers WHERE id = ? AND scheduled_for = ?)`,
+      ).bind(oldSlot, occupied.id, scheduledFor, wallpaperId, temporary),
+      env.WALLPAPERBOT_DB.prepare(
+        `UPDATE wallpapers SET scheduled_for = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ? AND status = 'scheduled' AND scheduled_for = ?`,
+      ).bind(scheduledFor, wallpaperId, temporary),
+    ]);
+    if (results.every((result) => result.meta.changes === 1)) {
+      await env.WALLPAPERBOT_DB.batch([
+        env.WALLPAPERBOT_DB.prepare("INSERT INTO wallpaper_events (wallpaper_id, event_type, details_json) VALUES (?, 'rescheduled', ?)")
+          .bind(wallpaperId, JSON.stringify({ scheduledFor, swappedWith: occupied.id })),
+        env.WALLPAPERBOT_DB.prepare("INSERT INTO wallpaper_events (wallpaper_id, event_type, details_json) VALUES (?, 'rescheduled', ?)")
+          .bind(occupied.id, JSON.stringify({ scheduledFor: oldSlot, swappedWith: wallpaperId })),
+      ]);
+      const card = await env.WALLPAPERBOT_DB.prepare(
+        "SELECT details_json FROM wallpaper_events WHERE wallpaper_id = ? AND event_type = 'preview_card' ORDER BY id DESC LIMIT 1",
+      ).bind(occupied.id).first<{ details_json: string }>();
+      if (card) {
+        const savedMessageId = (JSON.parse(card.details_json) as { messageId?: number }).messageId;
+        if (Number.isInteger(savedMessageId)) await restoreWallpaperCard(occupied.id, savedMessageId!, env);
+      }
+    }
+    await restoreWallpaperCard(wallpaperId, messageId, env);
+    return;
+  }
   const result = await env.WALLPAPERBOT_DB.prepare(
     `UPDATE wallpapers
      SET scheduled_for = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-     WHERE id = ? AND status = 'scheduled'`,
+     WHERE id = ? AND status = 'scheduled' AND scheduled_for IS ?
+       AND NOT EXISTS (SELECT 1 FROM wallpapers WHERE scheduled_for = ? AND status IN ('scheduled', 'publishing'))`,
   )
-    .bind(scheduledFor, wallpaperId)
+    .bind(scheduledFor, wallpaperId, wallpaper.scheduled_for, scheduledFor)
     .run();
   if (result.meta.changes !== 1) {
     await restoreWallpaperCard(wallpaperId, messageId, env);
@@ -1824,7 +1899,7 @@ async function publishWallpaper(
         "INSERT INTO wallpaper_events (wallpaper_id, event_type) VALUES (?, 'published')",
       ).bind(wallpaperId),
     ]);
-    const publishedText = `Wallpaper • ${wallpaper.artist_handle}\nPublished: ${formatTehranTime(new Date().toISOString())} (Tehran)\nImages: ${media.results.length}`;
+    const publishedText = `Wallpaper • ${wallpaper.artist_handle}\nPublished: ${formatTehranTime(new Date().toISOString())}\nImages: ${media.results.length}`;
     if (!(await updateWallpaperCard(wallpaperId, publishedText, undefined, env))) {
       await sendTelegramMessage(env, env.OWNER_TELEGRAM_USER_ID, `Published: ${wallpaper.artist_handle}.`);
     }

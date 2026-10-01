@@ -13,7 +13,7 @@ Successful submissions show the visual preview and a compact status card, withou
 Leave a scheduled wallpaper alone for automatic publication, or use its buttons:
 
 - **Publish now** — opens a confirmation screen in the status card, then posts to the currently connected public channel after confirmation.
-- **Reschedule** — shows the next six free Tehran-time slots in the same card. Selecting a slot updates the displayed schedule.
+- **Reschedule** — shows eligible future slots six per page, with arrows that update the same card. Times use Tehran's timezone without repeating the timezone in messages. ○ marks free slots; 🔒 marks occupied slots with the artist's name; ✓ marks the current slot. Free slots move the wallpaper, while occupied slots swap both wallpapers' times and update both preview cards. Publishing slots and other non-swappable occupied slots are hidden. Slots less than 15 minutes away are excluded.
 - **Cancel** — asks for confirmation, then deletes the queued item and its private archive files.
 
 These controls edit the status card. Each selection screen includes **Back** to return to the wallpaper controls before confirming an action.
